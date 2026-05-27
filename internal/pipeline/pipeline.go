@@ -36,8 +36,12 @@ type Pipeline struct {
 	homepage fetcher.HomepageDiscoverer
 	headless *fetcher.Headless // non-nil iff chromedp is in use; closed at Close
 	tracker  *progress.Tracker // optional; nil is treated as a no-op
-	closed   bool
-	mu       sync.Mutex
+	// numTargets is the total number of targets in this run (1 for -u, N
+	// for -f). The Python-parity permutation uses this to gate the /api
+	// fallback to single-target runs.
+	numTargets int
+	closed     bool
+	mu         sync.Mutex
 }
 
 // SetTracker attaches a progress.Tracker for live status reporting. Passing
@@ -46,6 +50,15 @@ func (p *Pipeline) SetTracker(t *progress.Tracker) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.tracker = t
+}
+
+// SetNumTargets records the total target count for this run. Used by the
+// Python-parity permutation stage to gate the /api fallback to single-
+// target (-u) mode. Safe to call before RunTarget.
+func (p *Pipeline) SetNumTargets(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.numTargets = n
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*Pipeline, error) {
@@ -359,9 +372,22 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		// the path-with-api-string heuristics, which Phase 2 keeps simple -
 		// the crawler emits full URLs when JS contains absolute API paths,
 		// and the relative ones get prefixed onto the target's scheme+host.
-		targets := buildProbeTargets(target, seeds, apiPathSet.Items(), apiMethodHints.Snapshot(), wellKnownAPIs)
-		// Seed the already-probed set with the primary targets so the
-		// ancestor-recurse stage skips URLs we already covered.
+		primaryTargets := buildProbeTargets(target, seeds, apiPathSet.Items(), apiMethodHints.Snapshot(), wellKnownAPIs)
+
+		// Python-parity Cartesian permutation: derive bases from chromedp-
+		// captured XHRs + truncation inference, split api-prefix paths,
+		// and combine. Gated on cfg.PermutateProbe. The /api fallback in
+		// PermutateTargets fires only when p.numTargets == 1 so -f
+		// batches don't spray it across N hosts.
+		var permTargets []probe.Target
+		if p.cfg.PermutateProbe {
+			permTargets = PermutateTargets(target, seeds, apiPathSet.Items(), apiMethodHints.Snapshot(), p.numTargets == 1)
+			p.log.Info("stage", "name", "permutate", "phase", "done",
+				"primary", len(primaryTargets), "permuted", len(permTargets))
+		}
+		targets := dedupTargets(append(primaryTargets, permTargets...))
+		// Seed the already-probed set with the primary+permuted targets so
+		// the ancestor-recurse stage skips URLs we already covered.
 		for _, t := range targets {
 			probedURLs[t.URL] = struct{}{}
 		}

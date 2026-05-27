@@ -73,6 +73,7 @@ type Config struct {
 
 	LogLevel string
 	LogFile  string
+	Verbose  bool
 	Proxy    string
 	UA       string
 
@@ -103,6 +104,13 @@ type Config struct {
 	// "conservative" (GET only — POST attempts skipped entirely), "all"
 	// (legacy three-method GET + POST_FORM + POST_JSON for every path).
 	ProbeFanout string
+
+	// PermutateProbe enables the Python-parity Cartesian URL permutation:
+	// derive multiple bases from chromedp-captured XHR URLs and from
+	// truncation inference, split api-prefix paths, and combine. Default
+	// true. Set false to revert to the lean single-base behaviour from
+	// earlier versions.
+	PermutateProbe bool
 }
 
 func Default() Config {
@@ -121,6 +129,7 @@ func Default() Config {
 		TLSFingerprint:       "chrome120",
 		AncestorRecurseDepth: 2,
 		ProbeFanout:          "action-aware",
+		PermutateProbe:       true,
 	}
 }
 

@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -45,4 +46,86 @@ func NewLoggerWithWriter(level, dest string, stderrWrap io.Writer) (*slog.Logger
 	}
 	h := slog.NewTextHandler(w, &slog.HandlerOptions{Level: lvl})
 	return slog.New(h), nil
+}
+
+// NewSplitLogger writes the same record to two destinations at independent
+// levels: a file (typically the verbose tail) and the wrapped stderr writer
+// (typically quiet, only WARN+). When filePath is empty no file handler is
+// created; when stderrWrap is nil os.Stderr is used directly. Either side
+// being unconfigured does not error — the logger just becomes single-handler.
+//
+// Used by the scan CLI to keep the interactive window quiet (progress only +
+// WARN+ slog spillover) while still capturing the full INFO/DEBUG trail to
+// disk for post-run debugging.
+func NewSplitLogger(filePath string, fileLevel string, stderrWrap io.Writer, stderrLevel string) (*slog.Logger, error) {
+	var handlers []slog.Handler
+	if filePath != "" && filePath != "stderr" {
+		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return nil, err
+		}
+		handlers = append(handlers, slog.NewTextHandler(f, &slog.HandlerOptions{Level: parseLevel(fileLevel)}))
+	}
+	var sw io.Writer = os.Stderr
+	if stderrWrap != nil {
+		sw = stderrWrap
+	}
+	handlers = append(handlers, slog.NewTextHandler(sw, &slog.HandlerOptions{Level: parseLevel(stderrLevel)}))
+	if len(handlers) == 1 {
+		return slog.New(handlers[0]), nil
+	}
+	return slog.New(&multiHandler{hs: handlers}), nil
+}
+
+func parseLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// multiHandler fans out a slog.Record to multiple downstream handlers; each
+// downstream applies its own level filter.
+type multiHandler struct {
+	hs []slog.Handler
+}
+
+func (m *multiHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	for _, h := range m.hs {
+		if h.Enabled(ctx, l) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *multiHandler) Handle(ctx context.Context, r slog.Record) error {
+	for _, h := range m.hs {
+		if h.Enabled(ctx, r.Level) {
+			_ = h.Handle(ctx, r)
+		}
+	}
+	return nil
+}
+
+func (m *multiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	out := make([]slog.Handler, len(m.hs))
+	for i, h := range m.hs {
+		out[i] = h.WithAttrs(attrs)
+	}
+	return &multiHandler{hs: out}
+}
+
+func (m *multiHandler) WithGroup(name string) slog.Handler {
+	out := make([]slog.Handler, len(m.hs))
+	for i, h := range m.hs {
+		out[i] = h.WithGroup(name)
+	}
+	return &multiHandler{hs: out}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,12 +44,31 @@ func newScanCmd() *cobra.Command {
 			}
 			defer trk.Stop()
 
-			// Route slog output through the tracker so log lines clear the
-			// spinner before printing. When cfg.LogFile is set, the wrapper
-			// is ignored (file logs aren't TTY).
-			logger, err := util.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFile, trk.Writer())
+			// Quiet-default logging: full INFO/DEBUG stream to a file under
+			// the output dir, only WARN+ to stderr (so the progress tracker
+			// owns the interactive window). --verbose lifts stderr to INFO.
+			// --log-file= overrides the auto-derived file path; passing the
+			// literal "stderr" routes everything to stderr at cfg.LogLevel.
+			filePath := cfg.LogFile
+			stderrLevel := "warn"
+			if cfg.Verbose {
+				stderrLevel = cfg.LogLevel
+			}
+			if filePath == "stderr" {
+				filePath = ""
+				stderrLevel = cfg.LogLevel
+			} else if filePath == "" {
+				if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
+					return fmt.Errorf("create out dir: %w", err)
+				}
+				filePath = filepath.Join(cfg.OutDir, "scan.log")
+			}
+			logger, err := util.NewSplitLogger(filePath, cfg.LogLevel, trk.Writer(), stderrLevel)
 			if err != nil {
 				return fmt.Errorf("logger: %w", err)
+			}
+			if filePath != "" {
+				fmt.Fprintf(os.Stderr, "log: %s\n", filePath)
 			}
 			startPprof(cfg.PprofAddr, logger)
 			targets, err := loadTargets(cfg)
@@ -67,6 +87,10 @@ func newScanCmd() *cobra.Command {
 				return err
 			}
 			runner.SetTracker(trk)
+			// numTargets gates the /api fallback in the Python-parity
+			// permutation: -u → 1 (fallback on), -f with N URLs → N
+			// (fallback off so we don't spray /api across hosts).
+			runner.SetNumTargets(len(targets))
 			defer runner.Close()
 
 			for _, t := range targets {
@@ -108,14 +132,16 @@ func newScanCmd() *cobra.Command {
 	f.BoolVar(&cfg.XLSXSplit, "xlsx-split", false, "write one report.xlsx per target (legacy layout); default: single combined report.xlsx at the output root")
 	f.BoolVar(&cfg.Resume, "resume", false, "resume from state.json if present")
 	f.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "debug|info|warn|error")
-	f.StringVar(&cfg.LogFile, "log-file", "", "log file path (default stderr)")
+	f.StringVar(&cfg.LogFile, "log-file", "", "log file path (default: <out>/scan.log; pass 'stderr' to route logs to terminal at --log-level)")
 	f.StringVar(&cfg.Proxy, "proxy", "", "HTTP(S) proxy URL")
 	f.StringVar(&cfg.UA, "user-agent", cfg.UA, "User-Agent header")
 	f.StringVar(&cfg.PprofAddr, "pprof", "", "enable net/http/pprof on this addr (e.g. :6060); empty disables")
 	f.BoolVar(&cfg.NoProgress, "no-progress", false, "disable the live status indicator (auto-disabled when stderr isn't a TTY)")
+	f.BoolVar(&cfg.Verbose, "verbose", false, "also stream INFO/DEBUG logs to stderr (default: only WARN+ on stderr, full log in <out>/scan.log)")
 	f.BoolVar(&cfg.NoStealth, "no-stealth", false, "disable chromedp stealth patches (debugging only)")
 	f.IntVar(&cfg.AncestorRecurseDepth, "ancestor-recurse-depth", cfg.AncestorRecurseDepth, "ascend up to N parent paths from 2xx probe hits and probe them (0 disables; 2 is the recommended upper bound)")
 	f.StringVar(&cfg.ProbeFanout, "probe-fanout", cfg.ProbeFanout, "method fan-out strategy when an api_path has no declared verb: action-aware (default; GET + POST_JSON for state-changing paths, GET only otherwise) | conservative (GET only) | all (legacy GET + POST_FORM + POST_JSON)")
+	f.BoolVar(&cfg.PermutateProbe, "permutate-probe", cfg.PermutateProbe, "expand the probe set with Python-parity URL permutation (cartesian of derived bases x api-prefix-split paths); set --permutate-probe=false to disable")
 
 	return cmd
 }
