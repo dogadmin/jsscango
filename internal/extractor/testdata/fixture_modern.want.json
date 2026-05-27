@@ -1,0 +1,267 @@
+[
+  {
+    "Kind": "api",
+    "Value": "/_nuxt/entry.0987.mjs",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/actuator/env",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/actuator/health",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/actuator/info",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/v1/devices/config",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/v1/devices/detail",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/v1/devices/list",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/assets/manifest.json",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/eureka/apps",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/eureka/apps/USER-SERVICE",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/graphql",
+    "Pattern": "api_5"
+  },
+  {
+    "Kind": "api",
+    "Value": "/openapi.json",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/openapi.yaml",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/swagger.json",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/v1/api-docs",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "10.0.0.5",
+    "Pattern": "internal_host"
+  },
+  {
+    "Kind": "api",
+    "Value": "192.168.1.100",
+    "Pattern": "internal_host"
+  },
+  {
+    "Kind": "api",
+    "Value": "actuator/env",
+    "Pattern": "actuator_endpoint"
+  },
+  {
+    "Kind": "api",
+    "Value": "actuator/health",
+    "Pattern": "actuator_endpoint"
+  },
+  {
+    "Kind": "api",
+    "Value": "actuator/info",
+    "Pattern": "actuator_endpoint"
+  },
+  {
+    "Kind": "api",
+    "Value": "assets/manifest.json",
+    "Pattern": "vite_manifest"
+  },
+  {
+    "Kind": "api",
+    "Value": "dubbo://nacos.intra:20880/com.acme.UserService",
+    "Pattern": "rpc_scheme"
+  },
+  {
+    "Kind": "api",
+    "Value": "eureka/apps",
+    "Pattern": "eureka_endpoint"
+  },
+  {
+    "Kind": "api",
+    "Value": "eureka/apps/USER-SERVICE",
+    "Pattern": "eureka_endpoint"
+  },
+  {
+    "Kind": "api",
+    "Value": "graphql",
+    "Pattern": "graphql_ep"
+  },
+  {
+    "Kind": "api",
+    "Value": "grpc://payment.intra:6565/Pay",
+    "Pattern": "rpc_scheme"
+  },
+  {
+    "Kind": "api",
+    "Value": "nacos://nacos.intra:8848/cluster",
+    "Pattern": "rpc_scheme"
+  },
+  {
+    "Kind": "api",
+    "Value": "openapi.json",
+    "Pattern": "swagger_doc"
+  },
+  {
+    "Kind": "api",
+    "Value": "openapi.yaml",
+    "Pattern": "openapi_yaml"
+  },
+  {
+    "Kind": "api",
+    "Value": "swagger.json",
+    "Pattern": "swagger_doc"
+  },
+  {
+    "Kind": "api",
+    "Value": "user-service.intra:8443",
+    "Pattern": "internal_host"
+  },
+  {
+    "Kind": "api",
+    "Value": "v1/api-docs",
+    "Pattern": "swagger_doc"
+  },
+  {
+    "Kind": "js",
+    "Value": "/_next/static/abcd1234efgh5678/_buildManifest.js",
+    "Pattern": "nextjs_build"
+  },
+  {
+    "Kind": "js",
+    "Value": "/_next/static/abcd1234efgh5678/_ssgManifest.js",
+    "Pattern": "js_1"
+  },
+  {
+    "Kind": "js",
+    "Value": "/_nuxt/chunks/pages-index.4a3f.js",
+    "Pattern": "js_1"
+  },
+  {
+    "Kind": "js",
+    "Value": "_nuxt/entry.0987.mjs",
+    "Pattern": "nuxt_chunks"
+  },
+  {
+    "Kind": "js",
+    "Value": "app.123.js",
+    "Pattern": "js_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/_nuxt/entry.0987.mjs",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/actuator/env",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/actuator/health",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/actuator/info",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v1/devices/config",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v1/devices/detail",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v1/devices/list",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/assets/manifest.json",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/eureka/apps",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/eureka/apps/USER-SERVICE",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/graphql",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/openapi.json",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/openapi.yaml",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/swagger.json",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/v1/api-docs",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "app.123.js.map",
+    "Pattern": "sourcemap_ref"
+  }
+]

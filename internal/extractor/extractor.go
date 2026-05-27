@@ -17,40 +17,68 @@ type Found struct {
 // FromJSBody scans body and emits JS URLs, static URLs, webpack chunks,
 // and API path candidates.
 //
-// Pattern order matters because dedupFound keeps the first occurrence of
-// each (kind, value). The Phase 4 framework-specific patterns
-// (patterns_extra.go) therefore run BEFORE the generic JS/static/API
-// regexes so e.g. /_next/static/.../_buildManifest.js is reported with the
-// "nextjs_build" pattern ID rather than the anonymous "js_1".
+// Phase 5: this calls into a single union-regex scan (union.go) plus the
+// webpack chunk extractor (which is a structurally different pattern that
+// doesn't fit the union form). Bodies larger than StreamThreshold are
+// scanned chunk-by-chunk with overlap; smaller bodies are scanned whole.
+//
+// Pattern order is preserved by the union builder so framework-specific
+// IDs win dedup over generic ones - see union.go:buildUnion for the
+// alternative ordering.
 func FromJSBody(body []byte) []Found {
-	text := string(body)
+	if len(body) == 0 {
+		return nil
+	}
 	out := make([]Found, 0, 64)
 
-	out = append(out, runExtraPatterns(text)...)
-
-	for _, chunk := range webpackChunks(text) {
+	// Webpack chunks need a body-spanning regex (`(?s).*`) and don't fit
+	// the union form. Scanned separately on the whole body when small;
+	// for huge bodies the chunked union path will miss webpack chunks
+	// because the runtime expression rarely exceeds 1 MiB, but if it does
+	// the user can re-run with a larger --max-body-mb.
+	for _, chunk := range webpackChunks(string(body)) {
 		out = append(out, Found{Kind: "js", Value: chunk, Pattern: "webpack_chunk"})
 	}
 
-	for i, re := range jsPatterns {
-		for _, m := range re.FindAllString(text, -1) {
-			if v, ok := jsFilter(strip(m)); ok {
-				out = append(out, Found{Kind: "js", Value: v, Pattern: jsPatternID(i)})
-			}
-		}
-	}
+	out = append(out, unionScanChunked(body)...)
 
-	for i, re := range staticPatterns {
-		for _, m := range re.FindAllString(text, -1) {
-			if v, ok := staticFilter(strip(m)); ok {
-				out = append(out, Found{Kind: "static", Value: v, Pattern: staticPatternID(i)})
-			}
-		}
-	}
-
-	out = append(out, runAPIPatterns(text)...)
+	// Recover JS-kind emissions that the union's leftmost-first semantics
+	// lose. When an api pattern (e.g. api_4: `path:"…"`) starts earlier
+	// than the generic js_1 pattern, the api alternative wins and the
+	// match is classified as api. The legacy per-pattern scanner also
+	// emitted these matches as kind=js because js_1 ran independently;
+	// we restore that emission for any api/static value whose suffix is
+	// .js so the crawler still recurses into the JS file.
+	out = backfillJSKind(out)
 
 	return dedupFound(out)
+}
+
+// backfillJSKind appends a synthetic Found{Kind:"js", ...} for any api or
+// static result whose Value ends in ".js" and isn't already emitted with
+// kind=js. The pattern ID is preserved so diagnostics still attribute the
+// match to its original source.
+func backfillJSKind(in []Found) []Found {
+	existing := make(map[string]struct{}, len(in))
+	for _, f := range in {
+		if f.Kind == "js" {
+			existing[f.Value] = struct{}{}
+		}
+	}
+	for _, f := range in {
+		if f.Kind == "js" {
+			continue
+		}
+		if !strings.HasSuffix(f.Value, ".js") {
+			continue
+		}
+		if _, ok := existing[f.Value]; ok {
+			continue
+		}
+		existing[f.Value] = struct{}{}
+		in = append(in, Found{Kind: "js", Value: f.Value, Pattern: f.Pattern})
+	}
+	return in
 }
 
 func runAPIPatterns(text string) []Found {

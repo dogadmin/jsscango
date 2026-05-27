@@ -83,7 +83,40 @@ when `Probe.Kept == true`).
 - Phase 2: probe + rules engine + xlsx — done.
 - Phase 3: chromedp headless + resume — done.
 - Phase 4: Aho-Corasick on 3 hot paths + new framework patterns + pprof — done.
-- Phase 5 (deferred): union regex single-pass extractor + streaming bodies for >4 MiB.
+- Phase 5: tier-union extractor + chunked streaming + golden tests + docs + release CI — done.
+
+### Phase 5 specifics
+
+- **Tier-union extractor** (`internal/extractor/union.go`) compiles the four
+  pattern tiers (extras, JS, static, API) into one regex each, so each tier
+  scans the body in a single pass instead of running each sub-pattern
+  individually. Tiers run in priority order (extras > js > static > api) so
+  dedup keeps the more specific pattern ID. Cross-tier union was rejected
+  because RE2's leftmost-first lets a generic pattern starting one byte
+  earlier outrank a more-specific extras pattern.
+
+- **Chunked streaming for large bodies** — bodies under 4 MiB are scanned
+  whole; larger bodies are split into 1 MiB windows with 16 KiB overlap.
+  The overlap exceeds the longest possible regex match (~250 chars from
+  the API patterns) so no match is lost at a chunk boundary.
+
+- **Golden tests** (`internal/extractor/golden_test.go` +
+  `internal/extractor/testdata/`) lock in the extractor's output on three
+  realistic fixtures (webpack runtime, Vue inline-script, modern-framework
+  blend). Run `go test -run TestGolden -update ./internal/extractor/` to
+  rebaseline after an intentional change.
+
+- **JSONL consumer guide** at [`docs/jsonl-consumer.md`](docs/jsonl-consumer.md)
+  — schema reference plus jq recipes for the common questions ("show every
+  kept probe URL", "count rule hits by kind", etc.), with bash and
+  PowerShell variants.
+
+- **Release CI** — `make release` cross-compiles for six targets
+  (linux/darwin/windows × amd64/arm64) with
+  `-trimpath -ldflags="-s -w -X main.version=…"` for reproducible builds.
+  `.github/workflows/ci.yml` runs vet+build+race-tests on every push;
+  `.github/workflows/release.yml` fires on `v*` tags, builds the six
+  binaries, computes SHA256, and uploads to a GitHub release.
 
 ### Phase 4 specifics
 

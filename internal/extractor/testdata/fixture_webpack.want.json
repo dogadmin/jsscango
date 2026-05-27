@@ -1,0 +1,122 @@
+[
+  {
+    "Kind": "api",
+    "Value": "/account/profile",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/admin/dashboard",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/auth/login",
+    "Pattern": "api_5"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/v1/config",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/orders/history",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/static/js",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "js",
+    "Value": "...js",
+    "Pattern": "js_2"
+  },
+  {
+    "Kind": "js",
+    "Value": "/assets/app.entry.js",
+    "Pattern": "js_1"
+  },
+  {
+    "Kind": "js",
+    "Value": "/chunks/polyfills.legacy.js",
+    "Pattern": "js_1"
+  },
+  {
+    "Kind": "js",
+    "Value": "/chunks/runtime.7c1e.js",
+    "Pattern": "js_1"
+  },
+  {
+    "Kind": "js",
+    "Value": "/polyfills/legacy.4521.js",
+    "Pattern": "js_1"
+  },
+  {
+    "Kind": "js",
+    "Value": "/static/js/42.abc123.js",
+    "Pattern": "webpack_chunk"
+  },
+  {
+    "Kind": "js",
+    "Value": "/static/js/57.def456.js",
+    "Pattern": "webpack_chunk"
+  },
+  {
+    "Kind": "js",
+    "Value": "/static/js/91.deadbeef.js",
+    "Pattern": "webpack_chunk"
+  },
+  {
+    "Kind": "js",
+    "Value": "/static/js/admin.7f2a.js",
+    "Pattern": "js_1"
+  },
+  {
+    "Kind": "js",
+    "Value": "/static/js/fallback.0001.js",
+    "Pattern": "js_1"
+  },
+  {
+    "Kind": "js",
+    "Value": "/static/js/main.hot-update.js",
+    "Pattern": "js_1"
+  },
+  {
+    "Kind": "js",
+    "Value": "/static/js/vendor.9912.js",
+    "Pattern": "js_1"
+  },
+  {
+    "Kind": "static",
+    "Value": "/account/profile",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/admin/dashboard",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/auth/login",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v1/config",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/orders/history",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/static/js",
+    "Pattern": "static_2"
+  }
+]

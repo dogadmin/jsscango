@@ -1,0 +1,132 @@
+[
+  {
+    "Kind": "api",
+    "Value": "/api/v1/user",
+    "Pattern": "api_2"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/v1/user/avatar",
+    "Pattern": "api_5"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/v1/user/create",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/v1/user/detail",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/v1/user/list",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/v1/user/update",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/api/v2/config/index",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/dashboard/overview",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/profile/settings",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/reports/monthly",
+    "Pattern": "api_4"
+  },
+  {
+    "Kind": "api",
+    "Value": "/services/order/cancel",
+    "Pattern": "api_5"
+  },
+  {
+    "Kind": "api",
+    "Value": "/services/order/refund",
+    "Pattern": "api_5"
+  },
+  {
+    "Kind": "api",
+    "Value": "/services/order/search",
+    "Pattern": "api_5"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v1/user",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v1/user/avatar",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v1/user/create",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v1/user/detail",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v1/user/list",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v1/user/update",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/api/v2/config/index",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/dashboard/overview",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/profile/settings",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/reports/monthly",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/services/order/cancel",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/services/order/refund",
+    "Pattern": "static_2"
+  },
+  {
+    "Kind": "static",
+    "Value": "/services/order/search",
+    "Pattern": "static_2"
+  }
+]
