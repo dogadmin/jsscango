@@ -1,0 +1,11 @@
+/jsscango
+/jsscango.exe
+/getjsurlscan
+/getjsurlscan.exe
+/results/
+/smoke/
+*.log
+.idea/
+.vscode/
+*.swp
+.DS_Store
