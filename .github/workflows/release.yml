@@ -5,12 +5,17 @@ on:
     tags:
       - 'v*'
 
+# Two-stage pattern: matrix `build` jobs produce per-platform binaries as
+# workflow artifacts, then a single `release` job downloads all of them and
+# creates the GitHub release in one shot. The previous one-job matrix pattern
+# triggered a race where each matrix worker tried to create the same release
+# in parallel and all but the first hit "already_exists" - splitting the
+# stages eliminates the race entirely.
+
 jobs:
-  release:
-    name: release (${{ matrix.goos }}/${{ matrix.goarch }})
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -51,15 +56,37 @@ jobs:
             -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
             -o "$out" \
             ./cmd/getjsurlscan
-          echo "ARTIFACT=$out" >> "$GITHUB_ENV"
+          sha256sum "$out" | tee "${out}.sha256"
 
-      - name: Compute SHA256
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jsscango_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage release files
         run: |
-          sha256sum "$ARTIFACT" | tee "${ARTIFACT}.sha256"
+          mkdir -p dist
+          # Each matrix artifact lands in its own subdir; flatten into dist/.
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -la dist/
 
-      - name: Upload release artifacts
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*
+          files: dist/*
           generate_release_notes: true
