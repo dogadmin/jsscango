@@ -244,3 +244,27 @@ func TestExtraPatterns_RPCScheme(t *testing.T) {
 		t.Errorf("rpc_scheme pattern not matched in %+v", got)
 	}
 }
+
+func TestExtraPatterns_WebSocket(t *testing.T) {
+	body := []byte(`const ws = new WebSocket("wss://ws.example.com/socket");`)
+	got := FromJSBody(body)
+	if !containsPattern(got, "websocket_url") {
+		t.Errorf("websocket_url pattern not matched in %+v", got)
+	}
+}
+
+func TestExtraPatterns_SSE(t *testing.T) {
+	body := []byte(`const es = new EventSource("/api/events/stream");`)
+	got := FromJSBody(body)
+	if !containsPattern(got, "sse_url") {
+		t.Errorf("sse_url pattern not matched in %+v", got)
+	}
+}
+
+func TestExtraPatterns_GraphQLClientQuery(t *testing.T) {
+	body := []byte(`client.query({ variables: vars, query: "query UserDetail($id: ID!) { user(id:$id) { name } }" });`)
+	got := FromJSBody(body)
+	if !containsPattern(got, "graphql_client_query") {
+		t.Errorf("graphql_client_query pattern not matched in %+v", got)
+	}
+}

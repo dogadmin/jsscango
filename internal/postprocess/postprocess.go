@@ -24,6 +24,12 @@ import (
 )
 
 // Processor scans response bodies and emits RuleHit events.
+//
+// EmitURL is an optional callback fed by the JSON-walk pass: when a saved
+// response body parses as JSON, the processor walks the structure for
+// URL-bearing fields and pushes each surfaced value through EmitURL. Leave
+// nil to skip the JSON-walk emission entirely; the rule-based scan still
+// runs.
 type Processor struct {
 	Rules   *rules.Set
 	Workers int
@@ -31,6 +37,7 @@ type Processor struct {
 	Target  string
 	Logger  *slog.Logger
 	Emit    func(types.RuleHit)
+	EmitURL func(d types.DiscoveredURL) // optional callback for JSON-walked URLs
 }
 
 // Run walks all *.txt files under <OutDir>/response and applies the rule set
@@ -94,6 +101,40 @@ func (p *Processor) processFile(path string) {
 			File:    path,
 		})
 	}
+
+	// Parallel pass: when the saved body parses as JSON, walk the structure
+	// and emit any URL-bearing field values via EmitURL. The cheap leading-
+	// byte gate ([] or {}) skips the parse for non-JSON bodies (HTML, JS,
+	// CSS, etc.) which is the common case. The file path is passed through
+	// as the Referer so downstream stages can trace the URL back to the
+	// originating response.
+	if p.EmitURL != nil && looksLikeJSON(data) {
+		for _, u := range WalkJSONForURLs(data) {
+			p.EmitURL(types.DiscoveredURL{
+				URL:     u,
+				Referer: path,
+				Kind:    types.KindAPIPath,
+				Source:  "json_walk",
+			})
+		}
+	}
+}
+
+// looksLikeJSON returns true when the first non-whitespace byte of data is
+// '{' or '['. It is a fast gate to avoid the json.Unmarshal cost on HTML
+// or JS bodies, which dominate the saved-response set.
+func looksLikeJSON(data []byte) bool {
+	for _, b := range data {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // Stats counts hits per Kind for the summary line.

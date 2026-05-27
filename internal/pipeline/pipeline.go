@@ -114,12 +114,14 @@ func selectHomepage(cfg config.Config, f fetcher.Fetcher, logger *slog.Logger) (
 		logger.Info("homepage discovery", "mode", "chromedp")
 		h := fetcher.NewHeadless()
 		h.Logger = logger
+		h.NoStealth = cfg.NoStealth
 		return h, h, nil
 	default: // ChromeAuto
 		if fetcher.HeadlessAvailable() {
 			logger.Info("homepage discovery", "mode", "chromedp", "reason", "auto detected Chrome")
 			h := fetcher.NewHeadless()
 			h.Logger = logger
+			h.NoStealth = cfg.NoStealth
 			return h, h, nil
 		}
 		logger.Info("homepage discovery", "mode", "static", "reason", "Chrome not found on PATH")
@@ -227,6 +229,31 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		emit("discovered_url", types.Report{URL: &d})
 	}
 
+	// --- Stage 0: well-known endpoints (free discovery before homepage) ----
+	// Robots.txt, sitemap.xml, OpenAPI/Swagger docs, and Spring actuator
+	// often expose route surface area at fixed URLs. Anything we learn here
+	// is funnelled into the same seeds + probe-URL paths used downstream,
+	// so the rest of the pipeline doesn't need to know this stage exists.
+	var wellKnownSeeds []types.DiscoveredURL
+	var wellKnownAPIs []crawler.APIEndpoint
+	if !p.cfg.SkipWellKnown && doStage(state.StageWellKnown) {
+		p.log.Info("stage", "name", state.StageWellKnown, "phase", "start")
+		setStage(state.StageWellKnown)
+		emit("stage", types.Report{Stage: state.StageWellKnown})
+		stageStart := time.Now()
+		wk := &crawler.WellKnown{F: p.fetch, Logger: p.log}
+		r, err := wk.Probe(ctx, target.URL)
+		if err != nil {
+			p.log.Warn("wellknown probe", "err", err)
+		}
+		wellKnownSeeds = r.Discovered
+		wellKnownAPIs = r.APIPaths
+		p.log.Info("stage", "name", state.StageWellKnown, "phase", "done",
+			"elapsed", time.Since(stageStart),
+			"urls", len(wellKnownSeeds), "openapi_endpoints", len(wellKnownAPIs))
+		_ = resume.Done(state.StageWellKnown)
+	}
+
 	// --- Stage 1: homepage -------------------------------------------------
 	var seeds []types.DiscoveredURL
 	if doStage(state.StageHomepage) {
@@ -242,6 +269,13 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		p.log.Info("stage", "name", state.StageHomepage, "phase", "done",
 			"elapsed", time.Since(stageStart), "seeds", len(seeds))
 		_ = resume.Done(state.StageHomepage)
+	}
+	// Prepend well-known seeds so the crawler walks them first. Doing this
+	// outside the homepage block keeps the wellknown stage useful even when
+	// homepage is skipped via --resume.
+	if len(wellKnownSeeds) > 0 {
+		seeds = append(wellKnownSeeds, seeds...)
+		setCount("seeds", len(seeds))
 	}
 
 	// --- Stage 2 + 3: crawl + inline API path extraction ------------------
@@ -293,7 +327,7 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		// path-with-api-string heuristics, which Phase 2 keeps simple - the
 		// crawler emits full URLs when JS contains absolute API paths, and
 		// the relative ones get prefixed onto the target's scheme+host.
-		urls := buildProbeURLs(target, seeds, apiPathSet.Items())
+		urls := buildProbeURLs(target, seeds, apiPathSet.Items(), wellKnownAPIs)
 		setStage(state.StageProbe)
 		p.log.Info("stage", "name", state.StageProbe, "phase", "start",
 			"urls", len(urls), "workers", p.cfg.WorkersProbe, "per_host_qps", p.cfg.PerHostQPS)
@@ -355,6 +389,14 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 				setCount("rule_hits", int(liveHits.Add(1)))
 				emit("rule_hit", types.Report{Hit: &h})
 			},
+			// JSON-walk pass: surface URL-bearing fields (href / url / link
+			// / endpoint / action / path) found inside saved JSON responses
+			// as discovered_url events. Marked source="json_walk" so output
+			// consumers can tell these apart from regex-scanned hits.
+			EmitURL: func(d types.DiscoveredURL) {
+				d.Target = target.URL
+				emit("discovered_url", types.Report{URL: &d})
+			},
 		}
 		if err := pp.Run(ctx); err != nil {
 			p.log.Warn("postprocess", "err", err)
@@ -411,7 +453,10 @@ func buildSinks(cfg config.Config) *output.Multi {
 // buildProbeURLs combines target base URL with each API path candidate to
 // produce concrete URLs for the probe stage. Absolute paths starting with /
 // are joined onto the target's scheme://host; full URLs are passed through.
-func buildProbeURLs(target types.Target, seeds []types.DiscoveredURL, apiPaths []string) []string {
+// wellKnownAPIs are OpenAPI/Swagger/actuator-derived (path, method) pairs;
+// the methods are not yet consulted by the probe stage but are accepted
+// here so the wiring is in place for the eventual method-aware probe.
+func buildProbeURLs(target types.Target, seeds []types.DiscoveredURL, apiPaths []string, wellKnownAPIs []crawler.APIEndpoint) []string {
 	base := target.Scheme + "://" + target.Host
 	if target.Port != "" {
 		base = target.Scheme + "://" + target.Host + ":" + target.Port
@@ -446,6 +491,22 @@ func buildProbeURLs(target types.Target, seeds []types.DiscoveredURL, apiPaths [
 			add(s.URL)
 		}
 	}
+	// 3. Well-known endpoints (OpenAPI/Swagger/actuator). Methods are
+	// retained on the APIEndpoint struct but not yet consulted — the probe
+	// stage still sends the GET/POST_FORM/POST_JSON triple.
+	for _, e := range wellKnownAPIs {
+		p := e.Path
+		switch {
+		case p == "":
+			continue
+		case strings.HasPrefix(p, "http://"), strings.HasPrefix(p, "https://"):
+			add(p)
+		case strings.HasPrefix(p, "/"):
+			add(base + p)
+		default:
+			add(base + "/" + p)
+		}
+	}
 	return out
 }
 
@@ -470,7 +531,7 @@ func buildTarget(raw string, cfg config.Config) (types.Target, error) {
 // stageList returns the names of stages already marked done in r, sorted
 // for log readability.
 func stageList(r *state.Resume) []string {
-	all := []string{state.StageHomepage, state.StageCrawl, state.StageProbe, state.StagePostprocess}
+	all := []string{state.StageWellKnown, state.StageHomepage, state.StageCrawl, state.StageProbe, state.StagePostprocess}
 	var out []string
 	for _, s := range all {
 		if r.IsDone(s) {

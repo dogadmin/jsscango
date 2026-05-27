@@ -80,5 +80,22 @@ var extraPatterns = func() []extraPattern {
 		// dev configs.
 		mk("internal_host", "api",
 			`(?i)\b((?:localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|[a-z0-9\-]+\.(?:internal|intra|corp|lan|local))(?::\d{2,5})?)\b`, 1, nil),
+
+		// ---- WebSocket / SSE / GraphQL client discovery ------------------
+		// WebSocket and SSE patterns capture the URL directly from the
+		// constructor call. ws:// / wss:// URLs flow through the regular
+		// emit path; the probe stage will fail their first GET and skip on
+		// (probing real WebSocket traffic is out of scope).
+		mk("websocket_url", "api",
+			`(?i)new\s+WebSocket\s*\(\s*['"]([^'"]+)['"]`, 1, nil),
+		mk("sse_url", "api",
+			`(?i)new\s+EventSource\s*\(\s*['"]([^'"]+)['"]`, 1, nil),
+		// GraphQL client capture: log the operationName from a
+		// client.query({ query: "query UserDetail ..." }) call. The value
+		// is not a URL but a string worth surfacing - it tells the operator
+		// "this app has a GraphQL operation called UserDetail" which is
+		// investigable against the /graphql endpoint emitted elsewhere.
+		mk("graphql_client_query", "api",
+			`(?i)(?:client|apollo|gql)\.(?:query|mutate|subscribe)\s*\(\s*\{\s*(?:[a-z]+\s*:\s*[^,}]+,\s*)*query\s*:\s*['"]\s*(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)`, 1, nil),
 	}
 }()

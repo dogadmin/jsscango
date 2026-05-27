@@ -40,6 +40,11 @@ type Config struct {
 	NoProbe     bool
 	CollectOnly bool
 
+	// SkipWellKnown disables the pre-homepage well-known discovery stage
+	// that probes robots.txt, sitemap.xml, OpenAPI/Swagger docs, and
+	// /actuator endpoints. Default false (stage runs).
+	SkipWellKnown bool
+
 	Workers       int
 	WorkersCrawl  int
 	WorkersProbe  int
@@ -49,6 +54,11 @@ type Config struct {
 	Timeout       time.Duration
 	TargetTimeout time.Duration
 	SecureTLS     bool
+
+	// TLSFingerprint controls JA3 mimicry. One of: chrome120 (default),
+	// firefox120, safari17, go (stdlib crypto/tls — known JA3, easier
+	// for WAFs to challenge).
+	TLSFingerprint string
 
 	RulesFile string
 	Formats   []Format
@@ -68,21 +78,27 @@ type Config struct {
 	// TTY. Useful for operators piping the live stderr stream into less or
 	// other consumers that don't render ANSI cursor controls.
 	NoProgress bool
+
+	// NoStealth, when true, disables the chromedp anti-detection stealth
+	// patches injected via Page.addScriptToEvaluateOnNewDocument. Default
+	// false (stealth ON); flip on for debugging the unpatched fingerprint.
+	NoStealth bool
 }
 
 func Default() Config {
 	return Config{
-		Chrome:        ChromeAuto,
-		Workers:       64,
-		PerHostQPS:    5.0,
-		MaxDepth:      3,
-		MaxBodyMB:     16,
-		Timeout:       DefaultTimeout,
-		TargetTimeout: DefaultTargetTTL,
-		Formats:       []Format{FormatJSONL, FormatXLSX},
-		OutDir:        "results",
-		LogLevel:      "info",
-		UA:            DefaultUserAgent,
+		Chrome:         ChromeAuto,
+		Workers:        64,
+		PerHostQPS:     5.0,
+		MaxDepth:       3,
+		MaxBodyMB:      16,
+		Timeout:        DefaultTimeout,
+		TargetTimeout:  DefaultTargetTTL,
+		Formats:        []Format{FormatJSONL, FormatXLSX},
+		OutDir:         "results",
+		LogLevel:       "info",
+		UA:             DefaultUserAgent,
+		TLSFingerprint: "chrome120",
 	}
 }
 
@@ -113,6 +129,13 @@ func (c *Config) Normalize() error {
 		}
 	default:
 		return fmt.Errorf("invalid --chrome value %q (want on|off|auto)", c.Chrome)
+	}
+	switch c.TLSFingerprint {
+	case "":
+		c.TLSFingerprint = "chrome120"
+	case "chrome120", "firefox120", "safari17", "go":
+	default:
+		return fmt.Errorf("invalid --tls-fingerprint %q (want chrome120|firefox120|safari17|go)", c.TLSFingerprint)
 	}
 	if c.URL == "" && c.File == "" {
 		return fmt.Errorf("either -u/--url or -f/--file is required")

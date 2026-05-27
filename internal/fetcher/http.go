@@ -27,7 +27,7 @@ type HTTPFetcher struct {
 
 // New returns an HTTPFetcher configured from cfg.
 func New(cfg config.Config) (*HTTPFetcher, error) {
-	tr, err := newTransport(!cfg.SecureTLS, cfg.Proxy)
+	tr, err := newTransport(!cfg.SecureTLS, cfg.Proxy, cfg.TLSFingerprint)
 	if err != nil {
 		return nil, err
 	}

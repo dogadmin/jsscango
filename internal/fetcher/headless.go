@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 
 	"github.com/dogadmin/jsscango/internal/types"
@@ -35,6 +36,7 @@ type HomepageDiscoverer interface {
 type Headless struct {
 	NavTimeout time.Duration // per-target navigation timeout; default 30s
 	Logger     *slog.Logger  // optional; defaults to slog.Default()
+	NoStealth  bool          // when true, skip injecting the anti-detection stealth script
 
 	once     sync.Once
 	allocCtx context.Context
@@ -147,6 +149,16 @@ func (h *Headless) Discover(ctx context.Context, targetURL, cookies string) ([]t
 
 	tasks := chromedp.Tasks{
 		network.Enable(),
+	}
+	if !h.NoStealth {
+		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+			if _, err := page.AddScriptToEvaluateOnNewDocument(StealthJS()).Do(ctx); err != nil {
+				log.Warn("headless: stealth injection failed", "err", err)
+			} else {
+				log.Debug("headless: stealth script injected")
+			}
+			return nil // never fail the whole nav over a stealth issue
+		}))
 	}
 	if cookies != "" {
 		tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{"Cookie": cookies}))

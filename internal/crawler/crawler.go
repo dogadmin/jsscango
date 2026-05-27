@@ -161,6 +161,24 @@ func (c *Crawler) process(ctx context.Context, j job, enqueue func(job)) {
 			})
 		}
 	}
+	// Auto-fetch source maps when the extractor flagged a sourcemap_ref.
+	// The .map's sourcesContent is fed back through FromJSBody so URLs and
+	// patterns hidden in the original source surface alongside the minified
+	// matches. We cap recursion (don't re-fetch maps discovered in maps) by
+	// gating on Seen.AddURL for the .map URL itself.
+	for _, f := range found {
+		if f.Pattern != "sourcemap_ref" {
+			continue
+		}
+		mapURL := util.JoinNewURL(scheme, base, root, f.Value)
+		if mapURL == "" {
+			continue
+		}
+		if c.Seen != nil && !c.Seen.AddURL(mapURL) {
+			continue
+		}
+		c.expandSourceMap(ctx, mapURL, j.url)
+	}
 }
 
 func (c *Crawler) emit(d types.DiscoveredURL) {

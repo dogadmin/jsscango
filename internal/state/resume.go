@@ -16,6 +16,7 @@ const ResumeSchemaVersion = "jsscango-state/v1"
 // Stage names. Use these constants when calling Resume.Done / Resume.IsDone
 // so a typo in one site doesn't silently break resume.
 const (
+	StageWellKnown   = "wellknown"
 	StageHomepage    = "homepage"
 	StageCrawl       = "crawl"
 	StageProbe       = "probe"

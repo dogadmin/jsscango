@@ -91,6 +91,7 @@ func newScanCmd() *cobra.Command {
 	f.BoolVar(&cfg.NoCollect, "no-collect", false, "skip stages 1-3 (consume cached responses)")
 	f.BoolVar(&cfg.NoProbe, "no-probe", false, "skip API probing")
 	f.BoolVar(&cfg.CollectOnly, "collect-only", false, "collect URLs/APIs only, no probing")
+	f.BoolVar(&cfg.SkipWellKnown, "skip-wellknown", false, "skip the well-known endpoint pre-scan (robots.txt, sitemap.xml, openapi.json, actuator, etc.)")
 	f.IntVar(&cfg.Workers, "workers", cfg.Workers, "default worker pool size")
 	f.IntVar(&cfg.WorkersCrawl, "workers-crawl", 0, "override crawl pool size (0=workers)")
 	f.IntVar(&cfg.WorkersProbe, "workers-probe", 0, "override probe pool size (0=workers)")
@@ -100,6 +101,7 @@ func newScanCmd() *cobra.Command {
 	f.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "per-request timeout")
 	f.DurationVar(&cfg.TargetTimeout, "target-timeout", cfg.TargetTimeout, "per-target timeout")
 	f.BoolVar(&cfg.SecureTLS, "secure-tls", false, "verify TLS certs (default: skip)")
+	f.StringVar(&cfg.TLSFingerprint, "tls-fingerprint", cfg.TLSFingerprint, "TLS ClientHello fingerprint: chrome120|firefox120|safari17|go")
 	f.StringVar(&cfg.RulesFile, "rules", "", "rules YAML override path")
 	f.StringVar(&formatsCSV, "format", "jsonl,xlsx", "output formats: jsonl,xlsx")
 	f.StringVar(&cfg.OutDir, "out", cfg.OutDir, "output directory")
@@ -110,6 +112,7 @@ func newScanCmd() *cobra.Command {
 	f.StringVar(&cfg.UA, "user-agent", cfg.UA, "User-Agent header")
 	f.StringVar(&cfg.PprofAddr, "pprof", "", "enable net/http/pprof on this addr (e.g. :6060); empty disables")
 	f.BoolVar(&cfg.NoProgress, "no-progress", false, "disable the live status indicator (auto-disabled when stderr isn't a TTY)")
+	f.BoolVar(&cfg.NoStealth, "no-stealth", false, "disable chromedp stealth patches (debugging only)")
 
 	return cmd
 }
