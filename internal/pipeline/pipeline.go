@@ -26,13 +26,15 @@ import (
 // are reused across targets. RunTarget executes the 5-stage flow for a single
 // URL.
 type Pipeline struct {
-	cfg    config.Config
-	log    *slog.Logger
-	fetch  fetcher.Fetcher
-	rules  *rules.Set
-	sinks  *output.Multi
-	closed bool
-	mu     sync.Mutex
+	cfg      config.Config
+	log      *slog.Logger
+	fetch    fetcher.Fetcher
+	rules    *rules.Set
+	sinks    *output.Multi
+	homepage fetcher.HomepageDiscoverer
+	headless *fetcher.Headless // non-nil iff chromedp is in use; closed at Close
+	closed   bool
+	mu       sync.Mutex
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*Pipeline, error) {
@@ -66,13 +68,50 @@ func New(cfg config.Config, logger *slog.Logger) (*Pipeline, error) {
 			sinks = append(sinks, output.NewXLSX(cfg.OutDir))
 		}
 	}
+
+	// Pick the homepage discoverer: chromedp when requested (or auto + Chrome
+	// is available), else the static HTML parser. Either way the pipeline
+	// downstream depends only on fetcher.HomepageDiscoverer.
+	homepage, headless, err := selectHomepage(cfg, f, logger)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Pipeline{
-		cfg:   cfg,
-		log:   logger,
-		fetch: f,
-		rules: rs,
-		sinks: &output.Multi{Sinks: sinks},
+		cfg:      cfg,
+		log:      logger,
+		fetch:    f,
+		rules:    rs,
+		sinks:    &output.Multi{Sinks: sinks},
+		homepage: homepage,
+		headless: headless,
 	}, nil
+}
+
+// selectHomepage resolves --chrome={on,off,auto} into a concrete
+// HomepageDiscoverer. Returns the discoverer and, if chromedp is used, a
+// pointer to the Headless so Pipeline.Close can shut it down.
+func selectHomepage(cfg config.Config, f fetcher.Fetcher, logger *slog.Logger) (fetcher.HomepageDiscoverer, *fetcher.Headless, error) {
+	switch cfg.Chrome {
+	case config.ChromeOff:
+		logger.Info("homepage discovery", "mode", "static")
+		return &crawler.StaticHomepage{F: f}, nil, nil
+	case config.ChromeOn:
+		if !fetcher.HeadlessAvailable() {
+			return nil, nil, fmt.Errorf("--chrome=on requires a Chrome/Chromium binary on PATH; install Chrome or use --chrome=auto/off")
+		}
+		logger.Info("homepage discovery", "mode", "chromedp")
+		h := fetcher.NewHeadless()
+		return h, h, nil
+	default: // ChromeAuto
+		if fetcher.HeadlessAvailable() {
+			logger.Info("homepage discovery", "mode", "chromedp", "reason", "auto detected Chrome")
+			h := fetcher.NewHeadless()
+			return h, h, nil
+		}
+		logger.Info("homepage discovery", "mode", "static", "reason", "Chrome not found on PATH")
+		return &crawler.StaticHomepage{F: f}, nil, nil
+	}
 }
 
 func (p *Pipeline) Close() error {
@@ -82,6 +121,9 @@ func (p *Pipeline) Close() error {
 		return nil
 	}
 	p.closed = true
+	if p.headless != nil {
+		p.headless.Close()
+	}
 	return p.sinks.Close()
 }
 
@@ -112,6 +154,27 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 
 	seen := state.NewSeen()
 
+	// --- Resume state (--resume) ------------------------------------------
+	// On --resume we load any existing state.json, hydrate Seen with prior
+	// URLs (so the crawler won't re-fetch them), and skip stages already
+	// marked done. Fresh runs always create a new state file.
+	resume, resumed, err := state.LoadOrInit(outDir, target.URL)
+	if err != nil {
+		p.log.Warn("resume load", "err", err)
+		resume, _, _ = state.LoadOrInit(outDir, target.URL)
+	}
+	if resumed && p.cfg.Resume {
+		resume.HydrateSeen(seen)
+		p.log.Info("resuming", "stages_done", stageList(resume))
+	}
+	doStage := func(name string) bool {
+		if p.cfg.Resume && resume.IsDone(name) {
+			p.log.Info("skipping stage (resume)", "stage", name)
+			return false
+		}
+		return true
+	}
+
 	// Stats counters (shared, mutex-protected via their own types).
 	stats := struct {
 		urlsDiscovered, jsDiscovered, apiPaths int
@@ -133,15 +196,17 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 	}
 
 	// --- Stage 1: homepage -------------------------------------------------
-	emit("stage", types.Report{Stage: "homepage"})
-	hp := &crawler.StaticHomepage{F: p.fetch}
-	seeds, err := hp.Discover(ctx, target.URL, p.cfg.Cookies)
-	if err != nil {
-		p.log.Warn("homepage discover", "url", target.URL, "err", err)
+	var seeds []types.DiscoveredURL
+	if doStage(state.StageHomepage) {
+		emit("stage", types.Report{Stage: state.StageHomepage})
+		seeds, err = p.homepage.Discover(ctx, target.URL, p.cfg.Cookies)
+		if err != nil {
+			p.log.Warn("homepage discover", "url", target.URL, "err", err)
+		}
+		_ = resume.Done(state.StageHomepage)
 	}
 
 	// --- Stage 2 + 3: crawl + inline API path extraction ------------------
-	emit("stage", types.Report{Stage: "crawl"})
 	apiPathSet := newConcurrentSet()
 	apiEmitter := func(d types.DiscoveredURL) {
 		emitDU(d)
@@ -152,24 +217,29 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			}})
 		}
 	}
-	cr := &crawler.Crawler{
-		F:          p.fetch,
-		Seen:       seen,
-		Workers:    p.cfg.WorkersCrawl,
-		MaxDepth:   p.cfg.MaxDepth,
-		BaseDomain: target.BaseDomain,
-		Logger:     p.log,
-		Emit:       apiEmitter,
-	}
-	if err := cr.Run(ctx, seeds); err != nil {
-		p.log.Warn("crawl", "err", err)
+	if doStage(state.StageCrawl) {
+		emit("stage", types.Report{Stage: state.StageCrawl})
+		cr := &crawler.Crawler{
+			F:          p.fetch,
+			Seen:       seen,
+			Workers:    p.cfg.WorkersCrawl,
+			MaxDepth:   p.cfg.MaxDepth,
+			BaseDomain: target.BaseDomain,
+			Logger:     p.log,
+			Emit:       apiEmitter,
+		}
+		if err := cr.Run(ctx, seeds); err != nil {
+			p.log.Warn("crawl", "err", err)
+		}
+		resume.SetSeenURLs(seen.Snapshot())
+		_ = resume.Done(state.StageCrawl)
 	}
 
 	probeCount, hitCount := 0, 0
 
 	// --- Stage 4: probe ---------------------------------------------------
-	if !p.cfg.NoProbe && !p.cfg.CollectOnly {
-		emit("stage", types.Report{Stage: "probe"})
+	if !p.cfg.NoProbe && !p.cfg.CollectOnly && doStage(state.StageProbe) {
+		emit("stage", types.Report{Stage: state.StageProbe})
 
 		// Construct probe URLs: combine each discovered base URL with each
 		// API path. Faithful to filter_data() in getJsUrl.py:119 minus the
@@ -195,11 +265,12 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			p.log.Warn("probe", "err", err)
 		}
 		probeCount = probeStats.Total
+		_ = resume.Done(state.StageProbe)
 	}
 
 	// --- Stage 5: postprocess (rule hits on saved bodies) -----------------
-	if !p.cfg.NoProbe && !p.cfg.CollectOnly {
-		emit("stage", types.Report{Stage: "postprocess"})
+	if !p.cfg.NoProbe && !p.cfg.CollectOnly && doStage(state.StagePostprocess) {
+		emit("stage", types.Report{Stage: state.StagePostprocess})
 		ppStats := postprocess.NewStats()
 		pp := &postprocess.Processor{
 			Rules:   p.rules,
@@ -216,7 +287,15 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			p.log.Warn("postprocess", "err", err)
 		}
 		hitCount = ppStats.Total()
+		_ = resume.Done(state.StagePostprocess)
 	}
+
+	resume.SetStat("urls_discovered", stats.urlsDiscovered)
+	resume.SetStat("js_discovered", stats.jsDiscovered)
+	resume.SetStat("api_paths", stats.apiPaths)
+	resume.SetStat("probes", probeCount)
+	resume.SetStat("rule_hits", hitCount)
+	_ = resume.Finish()
 
 	emit("summary", types.Report{Summary: &types.Summary{
 		DurationMS:     time.Since(start).Milliseconds(),
@@ -309,6 +388,19 @@ func buildTarget(raw string, cfg config.Config) (types.Target, error) {
 		StartedAt:  time.Now(),
 	}
 	return t, nil
+}
+
+// stageList returns the names of stages already marked done in r, sorted
+// for log readability.
+func stageList(r *state.Resume) []string {
+	all := []string{state.StageHomepage, state.StageCrawl, state.StageProbe, state.StagePostprocess}
+	var out []string
+	for _, s := range all {
+		if r.IsDone(s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // concurrentSet is a tiny string set with a mutex; the crawler emits API

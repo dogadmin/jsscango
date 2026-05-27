@@ -81,8 +81,17 @@ when `Probe.Kept == true`).
 
 - Phase 1: skeleton + HTTP fetcher + crawler + JSONL — done.
 - Phase 2: probe + rules engine + xlsx — done.
-- Phase 3: chromedp headless + resume — pending.
+- Phase 3: chromedp headless + resume — done.
 - Phase 4: extractor optimisations (union regex, Aho-Corasick, streaming) — pending.
+
+`--chrome=auto` (default) uses chromedp when a Chrome/Chromium binary is on
+PATH, otherwise falls back to the static HTML homepage parser. Use
+`--chrome=on` to require it, `--chrome=off` to disable.
+
+`--resume` reads `results/<target>/state.json` and skips any stage already
+completed. Use it to recover after Ctrl-C or to re-run only the parts that
+failed (e.g. delete `state.json`'s `probe` flag and re-run with `--resume`
+to redo probing only).
 
 ## License
 

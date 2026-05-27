@@ -11,15 +11,9 @@ import (
 	"github.com/dogadmin/jsscango/internal/types"
 )
 
-// HomepageDiscoverer locates the initial set of URLs for a target without
-// recursing. The static implementation parses <script src> via x/net/html;
-// the chromedp implementation (Phase 3) returns network-event URLs.
-type HomepageDiscoverer interface {
-	Discover(ctx context.Context, targetURL, cookies string) ([]types.DiscoveredURL, error)
-}
-
 // StaticHomepage is the requests + BeautifulSoup equivalent (no JS execution).
-// Mirrors indexJsFind in getJsUrl.py:36.
+// Mirrors indexJsFind in getJsUrl.py:36. The interface it satisfies lives in
+// the fetcher package alongside the chromedp impl - see fetcher.HomepageDiscoverer.
 type StaticHomepage struct {
 	F fetcher.Fetcher
 }
