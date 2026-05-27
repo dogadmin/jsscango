@@ -13,6 +13,7 @@ func NewRoot(version string) *cobra.Command {
 		SilenceUsage:  true,
 	}
 	root.AddCommand(newScanCmd())
+	root.AddCommand(newChromeCmd())
 	root.AddCommand(newVersionCmd(version))
 	return root
 }

@@ -102,11 +102,13 @@ func selectHomepage(cfg config.Config, f fetcher.Fetcher, logger *slog.Logger) (
 		}
 		logger.Info("homepage discovery", "mode", "chromedp")
 		h := fetcher.NewHeadless()
+		h.Logger = logger
 		return h, h, nil
 	default: // ChromeAuto
 		if fetcher.HeadlessAvailable() {
 			logger.Info("homepage discovery", "mode", "chromedp", "reason", "auto detected Chrome")
 			h := fetcher.NewHeadless()
+			h.Logger = logger
 			return h, h, nil
 		}
 		logger.Info("homepage discovery", "mode", "static", "reason", "Chrome not found on PATH")
@@ -198,11 +200,15 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 	// --- Stage 1: homepage -------------------------------------------------
 	var seeds []types.DiscoveredURL
 	if doStage(state.StageHomepage) {
+		p.log.Info("stage", "name", state.StageHomepage, "phase", "start")
 		emit("stage", types.Report{Stage: state.StageHomepage})
+		stageStart := time.Now()
 		seeds, err = p.homepage.Discover(ctx, target.URL, p.cfg.Cookies)
 		if err != nil {
 			p.log.Warn("homepage discover", "url", target.URL, "err", err)
 		}
+		p.log.Info("stage", "name", state.StageHomepage, "phase", "done",
+			"elapsed", time.Since(stageStart), "seeds", len(seeds))
 		_ = resume.Done(state.StageHomepage)
 	}
 
@@ -218,7 +224,10 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		}
 	}
 	if doStage(state.StageCrawl) {
+		p.log.Info("stage", "name", state.StageCrawl, "phase", "start",
+			"workers", p.cfg.WorkersCrawl, "max_depth", p.cfg.MaxDepth, "per_host_qps", p.cfg.PerHostQPS)
 		emit("stage", types.Report{Stage: state.StageCrawl})
+		stageStart := time.Now()
 		cr := &crawler.Crawler{
 			F:          p.fetch,
 			Seen:       seen,
@@ -232,6 +241,13 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			p.log.Warn("crawl", "err", err)
 		}
 		resume.SetSeenURLs(seen.Snapshot())
+		stats.mu.Lock()
+		urls := stats.urlsDiscovered
+		js := stats.jsDiscovered
+		apis := stats.apiPaths
+		stats.mu.Unlock()
+		p.log.Info("stage", "name", state.StageCrawl, "phase", "done",
+			"elapsed", time.Since(stageStart), "urls", urls, "js", js, "api_paths", apis)
 		_ = resume.Done(state.StageCrawl)
 	}
 
@@ -239,14 +255,16 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 
 	// --- Stage 4: probe ---------------------------------------------------
 	if !p.cfg.NoProbe && !p.cfg.CollectOnly && doStage(state.StageProbe) {
-		emit("stage", types.Report{Stage: state.StageProbe})
-
 		// Construct probe URLs: combine each discovered base URL with each
 		// API path. Faithful to filter_data() in getJsUrl.py:119 minus the
 		// path-with-api-string heuristics, which Phase 2 keeps simple - the
 		// crawler emits full URLs when JS contains absolute API paths, and
 		// the relative ones get prefixed onto the target's scheme+host.
 		urls := buildProbeURLs(target, seeds, apiPathSet.Items())
+		p.log.Info("stage", "name", state.StageProbe, "phase", "start",
+			"urls", len(urls), "workers", p.cfg.WorkersProbe, "per_host_qps", p.cfg.PerHostQPS)
+		emit("stage", types.Report{Stage: state.StageProbe})
+		stageStart := time.Now()
 		var probeStats probe.Stats
 		pr := &probe.Prober{
 			F:         p.fetch,
@@ -265,12 +283,18 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			p.log.Warn("probe", "err", err)
 		}
 		probeCount = probeStats.Total
+		p.log.Info("stage", "name", state.StageProbe, "phase", "done",
+			"elapsed", time.Since(stageStart),
+			"total", probeStats.Total, "kept", probeStats.Kept,
+			"dup", probeStats.Dup, "skipped", probeStats.Skipped, "failed", probeStats.Failed)
 		_ = resume.Done(state.StageProbe)
 	}
 
 	// --- Stage 5: postprocess (rule hits on saved bodies) -----------------
 	if !p.cfg.NoProbe && !p.cfg.CollectOnly && doStage(state.StagePostprocess) {
+		p.log.Info("stage", "name", state.StagePostprocess, "phase", "start")
 		emit("stage", types.Report{Stage: state.StagePostprocess})
+		stageStart := time.Now()
 		ppStats := postprocess.NewStats()
 		pp := &postprocess.Processor{
 			Rules:   p.rules,
@@ -287,6 +311,8 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			p.log.Warn("postprocess", "err", err)
 		}
 		hitCount = ppStats.Total()
+		p.log.Info("stage", "name", state.StagePostprocess, "phase", "done",
+			"elapsed", time.Since(stageStart), "rule_hits", hitCount)
 		_ = resume.Done(state.StagePostprocess)
 	}
 

@@ -33,11 +33,16 @@ func FromJSBody(body []byte) []Found {
 
 	// Webpack chunks need a body-spanning regex (`(?s).*`) and don't fit
 	// the union form. Scanned separately on the whole body when small;
-	// for huge bodies the chunked union path will miss webpack chunks
-	// because the runtime expression rarely exceeds 1 MiB, but if it does
-	// the user can re-run with a larger --max-body-mb.
-	for _, chunk := range webpackChunks(string(body)) {
-		out = append(out, Found{Kind: "js", Value: chunk, Pattern: "webpack_chunk"})
+	// for bodies over StreamThreshold we skip it entirely because the
+	// `string(body)` conversion would allocate a full copy and defeat
+	// the chunked-streaming path. The webpack runtime expression rarely
+	// exceeds 1 MiB, so this gate is a no-op in practice; if a target
+	// genuinely has a webpack runtime inside a > StreamThreshold body,
+	// edit StreamThreshold (a const in union.go) and rebuild.
+	if len(body) <= StreamThreshold {
+		for _, chunk := range webpackChunks(string(body)) {
+			out = append(out, Found{Kind: "js", Value: chunk, Pattern: "webpack_chunk"})
+		}
 	}
 
 	out = append(out, unionScanChunked(body)...)
@@ -48,16 +53,19 @@ func FromJSBody(body []byte) []Found {
 	// match is classified as api. The legacy per-pattern scanner also
 	// emitted these matches as kind=js because js_1 ran independently;
 	// we restore that emission for any api/static value whose suffix is
-	// .js so the crawler still recurses into the JS file.
+	// .js, .mjs, or .cjs (Nuxt 3 uses .mjs; some bundlers emit .cjs) so
+	// the crawler still recurses into the JS file.
 	out = backfillJSKind(out)
 
 	return dedupFound(out)
 }
 
 // backfillJSKind appends a synthetic Found{Kind:"js", ...} for any api or
-// static result whose Value ends in ".js" and isn't already emitted with
-// kind=js. The pattern ID is preserved so diagnostics still attribute the
-// match to its original source.
+// static result whose Value ends in ".js", ".mjs", or ".cjs" and isn't
+// already emitted with kind=js. Nuxt 3 chunks use .mjs and some bundlers
+// emit .cjs; both should still be classified as JS so the crawler recurses
+// into them. The pattern ID is preserved so diagnostics still attribute
+// the match to its original source.
 func backfillJSKind(in []Found) []Found {
 	existing := make(map[string]struct{}, len(in))
 	for _, f := range in {
@@ -69,7 +77,9 @@ func backfillJSKind(in []Found) []Found {
 		if f.Kind == "js" {
 			continue
 		}
-		if !strings.HasSuffix(f.Value, ".js") {
+		if !strings.HasSuffix(f.Value, ".js") &&
+			!strings.HasSuffix(f.Value, ".mjs") &&
+			!strings.HasSuffix(f.Value, ".cjs") {
 			continue
 		}
 		if _, ok := existing[f.Value]; ok {
@@ -79,28 +89,6 @@ func backfillJSKind(in []Found) []Found {
 		in = append(in, Found{Kind: "js", Value: f.Value, Pattern: f.Pattern})
 	}
 	return in
-}
-
-func runAPIPatterns(text string) []Found {
-	var out []Found
-	for i, re := range apiPatterns {
-		group := apiPatternGroups[i]
-		matches := re.FindAllStringSubmatch(text, -1)
-		for _, m := range matches {
-			var raw string
-			if group < len(m) {
-				raw = m[group]
-			} else {
-				raw = m[0]
-			}
-			v, ok := apiURLFilter(strip(raw))
-			if !ok {
-				continue
-			}
-			out = append(out, Found{Kind: "api", Value: v, Pattern: apiPatternID(i)})
-		}
-	}
-	return out
 }
 
 // jsFilter mirrors jsAndStaticUrlFind.py:14-35. Replaces escapes, strips
@@ -135,7 +123,10 @@ func staticFilter(s string) (string, bool) {
 	s = strings.TrimSpace(s)
 	s = strings.Trim(s, `"'`)
 	s = strings.TrimRight(s, "/")
-	if len(s) < 3 || strings.HasSuffix(s, ".js") {
+	if len(s) < 3 ||
+		strings.HasSuffix(s, ".js") ||
+		strings.HasSuffix(s, ".mjs") ||
+		strings.HasSuffix(s, ".cjs") {
 		return "", false
 	}
 	low := strings.ToLower(s)

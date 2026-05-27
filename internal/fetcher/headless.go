@@ -3,6 +3,7 @@ package fetcher
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -33,10 +34,12 @@ type HomepageDiscoverer interface {
 // per target. Concurrency-safe.
 type Headless struct {
 	NavTimeout time.Duration // per-target navigation timeout; default 30s
+	Logger     *slog.Logger  // optional; defaults to slog.Default()
 
 	once     sync.Once
 	allocCtx context.Context
 	cancel   context.CancelFunc
+	chromeAt string // resolved Chrome binary path, for logging
 	initErr  error
 }
 
@@ -44,6 +47,13 @@ type Headless struct {
 // browser is spawned lazily on the first Discover call.
 func NewHeadless() *Headless {
 	return &Headless{NavTimeout: 30 * time.Second}
+}
+
+func (h *Headless) log() *slog.Logger {
+	if h.Logger != nil {
+		return h.Logger
+	}
+	return slog.Default()
 }
 
 // Close terminates the underlying Chrome allocator. Safe to call multiple
@@ -70,7 +80,9 @@ func (h *Headless) ensureAllocator(parent context.Context) {
 		// Resolve a Chrome binary on systems where the default lookup fails.
 		if p := findChromePath(); p != "" {
 			opts = append(opts, chromedp.ExecPath(p))
+			h.chromeAt = p
 		}
+		h.log().Info("headless: initializing chrome allocator", "binary", h.chromeAt)
 		// We deliberately do not derive from `parent` here - the allocator
 		// must outlive any single target's ctx. Closing happens via
 		// Headless.Close().
@@ -82,11 +94,14 @@ func (h *Headless) ensureAllocator(parent context.Context) {
 // URL the browser asked for, classified by extension (mirrors
 // process_network_events in webdriverFind.py:64).
 func (h *Headless) Discover(ctx context.Context, targetURL, cookies string) ([]types.DiscoveredURL, error) {
+	log := h.log()
 	h.ensureAllocator(ctx)
 	if h.initErr != nil {
+		log.Warn("headless: allocator init failed", "err", h.initErr)
 		return nil, h.initErr
 	}
 
+	log.Info("headless: opening tab", "url", targetURL, "nav_timeout", h.NavTimeout)
 	tabCtx, tabCancel := chromedp.NewContext(h.allocCtx)
 	defer tabCancel()
 
@@ -107,6 +122,11 @@ func (h *Headless) Discover(ctx context.Context, targetURL, cookies string) ([]t
 	var mu sync.Mutex
 	seen := make(map[string]struct{}, 64)
 	var captured []netURL
+	captureCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(captured)
+	}
 
 	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
 		e, ok := ev.(*network.EventRequestWillBeSent)
@@ -132,20 +152,38 @@ func (h *Headless) Discover(ctx context.Context, targetURL, cookies string) ([]t
 		tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{"Cookie": cookies}))
 	}
 	tasks = append(tasks,
+		chromedp.ActionFunc(func(_ context.Context) error {
+			log.Info("headless: navigating", "url", targetURL)
+			return nil
+		}),
 		chromedp.Navigate(targetURL),
-		chromedp.WaitReady("body", chromedp.ByQuery),
-		// Brief pause lets async chunks fire their network requests before
-		// we tear down the tab. SPAs that issue requests on idle benefit
-		// from this; static sites are unaffected since events are already
-		// captured by the time WaitReady returns.
-		chromedp.Sleep(1500*time.Millisecond),
+		chromedp.ActionFunc(func(_ context.Context) error {
+			log.Debug("headless: navigated, settling 3s for async chunks", "captured", captureCount())
+			return nil
+		}),
+		// Settle period. We deliberately DO NOT use WaitReady("body") here:
+		// it hangs indefinitely on SPAs that re-mount body during hydration
+		// (observed on real targets) even though the event listener has
+		// already captured 100+ URLs. Since chromedp.ListenTarget runs
+		// independently of the task chain, the listener fills our slice
+		// throughout the navigation; this Sleep just gives async chunks
+		// time to fire their requests before we tear down the tab.
+		chromedp.Sleep(3*time.Second),
 	)
 
-	if err := chromedp.Run(navCtx, tasks); err != nil {
+	start := time.Now()
+	err := chromedp.Run(navCtx, tasks)
+	elapsed := time.Since(start)
+	finalCount := captureCount()
+
+	if err != nil {
 		// Even on nav error, we keep any URLs captured before the failure.
-		if len(captured) == 0 {
+		log.Warn("headless: run failed", "err", err, "elapsed", elapsed, "captured", finalCount)
+		if finalCount == 0 {
 			return nil, fmt.Errorf("headless: %w", err)
 		}
+	} else {
+		log.Info("headless: navigation complete", "url", targetURL, "elapsed", elapsed, "captured", finalCount)
 	}
 
 	mu.Lock()
@@ -187,6 +225,10 @@ func classifyNetworkURL(rawURL string) types.URLKind {
 	}
 }
 
+// LookupChromePath is the exported version of findChromePath, used by the
+// `chrome path` subcommand. Returns "" when no usable binary is found.
+func LookupChromePath() string { return findChromePath() }
+
 // findChromePath looks for a Chrome/Chromium binary. Returns "" if not found
 // (chromedp's default lookup will try too; we just give it a head start on
 // Windows where PATH typically doesn't include Chrome's install dir).
@@ -212,6 +254,12 @@ func findChromePath() string {
 				return p
 			}
 		}
+	}
+	// Finally check the go-rod launcher cache - populated by
+	// `jsscango chrome download`. This lets Linux deployments use
+	// chromedp without a system Chrome install.
+	if p := CachedChromePath(); p != "" {
+		return p
 	}
 	return ""
 }

@@ -1,6 +1,9 @@
 package extractor
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // Phase 4 URL-discovery patterns. These augment patterns_jsurl.go +
 // patterns_apiurl.go with framework-specific endpoint shapes that the
@@ -22,14 +25,27 @@ var extraPatterns = func() []extraPattern {
 	mk := func(id, kind, pat string, group int, filt func(string) (string, bool)) extraPattern {
 		return extraPattern{ID: id, Kind: kind, Re: regexp.MustCompile(pat), Group: group, Filt: filt}
 	}
+	// normalizeSlash prepends '/' to a captured path when it is missing. Used by
+	// the extras filters so a relative ref "manifest.json" and an absolute ref
+	// "/manifest.json" both emit "/manifest.json" - matching the generic api_2
+	// pattern's output and letting dedupFound collapse the two emissions.
+	normalizeSlash := func(s string) (string, bool) {
+		if s == "" {
+			return "", false
+		}
+		if !strings.HasPrefix(s, "/") && !strings.Contains(s, "://") {
+			return "/" + s, true
+		}
+		return s, true
+	}
 	return []extraPattern{
 		// ---- Swagger / OpenAPI / GraphQL discovery -----------------------
 		mk("swagger_doc", "api",
-			`(?i)["'/]((?:v[0-9]+/)?(?:api-docs|swagger\.json|openapi\.json|swagger/index\.html))\b`, 1, nil),
+			`(?i)["'](/?(?:v[0-9]+/)?(?:api-docs|swagger\.json|openapi\.json|swagger/index\.html))\b`, 1, normalizeSlash),
 		mk("openapi_yaml", "api",
-			`(?i)["'/](openapi\.(?:ya?ml|json))\b`, 1, nil),
+			`(?i)["'](/?openapi\.(?:ya?ml|json))\b`, 1, normalizeSlash),
 		mk("graphql_ep", "api",
-			`(?i)["'/](graphql|gql|api/graphql)["'?]`, 1, nil),
+			`(?i)["'](/?(?:graphql|gql|api/graphql))["'?]`, 1, normalizeSlash),
 
 		// ---- Source maps (point at original source paths) ----------------
 		mk("sourcemap_ref", "static",
@@ -37,18 +53,18 @@ var extraPatterns = func() []extraPattern {
 
 		// ---- Spring Cloud / Spring Boot service discovery ----------------
 		mk("actuator_endpoint", "api",
-			`["'/](actuator(?:/[a-z0-9_-]+)?)["']`, 1, nil),
+			`["'](/?actuator(?:/[a-z0-9_-]+)?)["']`, 1, normalizeSlash),
 		mk("eureka_endpoint", "api",
-			`["'/](eureka/apps(?:/[^"'<>\s]*)?)["']`, 1, nil),
+			`["'](/?eureka/apps(?:/[^"'<>\s]*)?)["']`, 1, normalizeSlash),
 
 		// ---- Vite / Nuxt / Next bundle metadata --------------------------
 		// Vite manifest is an asset map produced by `vite build`; finding it
 		// often gives the full asset list.
 		mk("vite_manifest", "api",
-			`["'/]((?:assets/)?manifest\.json)["']`, 1, nil),
+			`["'](/?(?:assets/)?manifest\.json)["']`, 1, normalizeSlash),
 		// Nuxt 3 / Next chunk URLs use predictable naming.
 		mk("nuxt_chunks", "js",
-			`(_nuxt/[A-Za-z0-9._\-]+\.(?:js|mjs))\b`, 1, nil),
+			`["'](/?_nuxt/[A-Za-z0-9._\-]+\.(?:js|mjs))\b`, 1, normalizeSlash),
 		// Next.js build ID is the most valuable thing to know - it gates
 		// access to /_next/static/<buildid>/_buildManifest.js etc.
 		mk("nextjs_build", "js",
@@ -66,33 +82,3 @@ var extraPatterns = func() []extraPattern {
 			`(?i)\b((?:localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|[a-z0-9\-]+\.(?:internal|intra|corp|lan|local))(?::\d{2,5})?)\b`, 1, nil),
 	}
 }()
-
-// runExtraPatterns scans text once per extra pattern and returns Found
-// candidates. Each candidate goes through the same dedup pass that
-// FromJSBody applies to its main results.
-func runExtraPatterns(text string) []Found {
-	var out []Found
-	for _, p := range extraPatterns {
-		matches := p.Re.FindAllStringSubmatch(text, -1)
-		for _, m := range matches {
-			idx := p.Group
-			if idx >= len(m) {
-				idx = 0
-			}
-			value := m[idx]
-			if p.Filt != nil {
-				var ok bool
-				value, ok = p.Filt(value)
-				if !ok {
-					continue
-				}
-			}
-			value = strip(value)
-			if value == "" {
-				continue
-			}
-			out = append(out, Found{Kind: p.Kind, Value: value, Pattern: p.ID})
-		}
-	}
-	return out
-}

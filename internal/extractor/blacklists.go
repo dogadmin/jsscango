@@ -28,7 +28,7 @@ var urlSubstrMatcher = aho.New(URLSubstrBlacklist)
 // FileExtBlacklist — file extensions that disqualify a candidate API path.
 // Derived from nodeCommon.py:34-35, with the leading dot.
 var FileExtBlacklist = []string{
-	".exe", ".apk", ".mp4", ".mkv", ".mp3", ".flv", ".js", ".css", ".less", ".woff", ".vue",
+	".exe", ".apk", ".mp4", ".mkv", ".mp3", ".flv", ".js", ".mjs", ".cjs", ".css", ".less", ".woff", ".vue",
 	".svg", ".png", ".jpg", ".jpeg", ".tif", ".bmp", ".gif", ".psd", ".exif", ".fpx",
 	".avif", ".apng", ".webp", ".swf", ".ico", ".svga", ".html", ".htm", ".shtml", ".ts",
 	".eot", ".lrc", ".tpl", ".cur", ".success", ".error", ".complete",
@@ -37,7 +37,7 @@ var FileExtBlacklist = []string{
 // StaticFileExtBlacklist — extensions disqualifying static-asset candidates.
 // nodeCommon.py:43-44 (a superset of FileExtBlacklist for static).
 var StaticFileExtBlacklist = []string{
-	".pdf", ".docx", ".doc", ".exe", ".apk", ".mp4", ".mkv", ".mp3", ".flv", ".css", ".less",
+	".pdf", ".docx", ".doc", ".exe", ".apk", ".mp4", ".mkv", ".mp3", ".flv", ".mjs", ".cjs", ".css", ".less",
 	".woff", ".vue", ".svg", ".png", ".jpg", ".jpeg", ".tif", ".bmp", ".gif", ".psd", ".exif",
 	".fpx", ".avif", ".apng", ".webp", ".swf", ".ico", ".svga", ".ts", ".eot", ".lrc",
 	".tpl", ".cur", ".success", ".error", ".complete", ".zip", ".rar", ".7z",

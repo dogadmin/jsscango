@@ -1,23 +1,18 @@
 [
   {
     "Kind": "api",
-    "Value": "/_nuxt/entry.0987.mjs",
-    "Pattern": "api_2"
-  },
-  {
-    "Kind": "api",
     "Value": "/actuator/env",
-    "Pattern": "api_2"
+    "Pattern": "actuator_endpoint"
   },
   {
     "Kind": "api",
     "Value": "/actuator/health",
-    "Pattern": "api_2"
+    "Pattern": "actuator_endpoint"
   },
   {
     "Kind": "api",
     "Value": "/actuator/info",
-    "Pattern": "api_2"
+    "Pattern": "actuator_endpoint"
   },
   {
     "Kind": "api",
@@ -37,42 +32,42 @@
   {
     "Kind": "api",
     "Value": "/assets/manifest.json",
-    "Pattern": "api_2"
+    "Pattern": "vite_manifest"
   },
   {
     "Kind": "api",
     "Value": "/eureka/apps",
-    "Pattern": "api_2"
+    "Pattern": "eureka_endpoint"
   },
   {
     "Kind": "api",
     "Value": "/eureka/apps/USER-SERVICE",
-    "Pattern": "api_2"
+    "Pattern": "eureka_endpoint"
   },
   {
     "Kind": "api",
     "Value": "/graphql",
-    "Pattern": "api_5"
+    "Pattern": "graphql_ep"
   },
   {
     "Kind": "api",
     "Value": "/openapi.json",
-    "Pattern": "api_2"
+    "Pattern": "swagger_doc"
   },
   {
     "Kind": "api",
     "Value": "/openapi.yaml",
-    "Pattern": "api_2"
+    "Pattern": "openapi_yaml"
   },
   {
     "Kind": "api",
     "Value": "/swagger.json",
-    "Pattern": "api_2"
+    "Pattern": "swagger_doc"
   },
   {
     "Kind": "api",
     "Value": "/v1/api-docs",
-    "Pattern": "api_2"
+    "Pattern": "swagger_doc"
   },
   {
     "Kind": "api",
@@ -86,43 +81,8 @@
   },
   {
     "Kind": "api",
-    "Value": "actuator/env",
-    "Pattern": "actuator_endpoint"
-  },
-  {
-    "Kind": "api",
-    "Value": "actuator/health",
-    "Pattern": "actuator_endpoint"
-  },
-  {
-    "Kind": "api",
-    "Value": "actuator/info",
-    "Pattern": "actuator_endpoint"
-  },
-  {
-    "Kind": "api",
-    "Value": "assets/manifest.json",
-    "Pattern": "vite_manifest"
-  },
-  {
-    "Kind": "api",
     "Value": "dubbo://nacos.intra:20880/com.acme.UserService",
     "Pattern": "rpc_scheme"
-  },
-  {
-    "Kind": "api",
-    "Value": "eureka/apps",
-    "Pattern": "eureka_endpoint"
-  },
-  {
-    "Kind": "api",
-    "Value": "eureka/apps/USER-SERVICE",
-    "Pattern": "eureka_endpoint"
-  },
-  {
-    "Kind": "api",
-    "Value": "graphql",
-    "Pattern": "graphql_ep"
   },
   {
     "Kind": "api",
@@ -136,28 +96,8 @@
   },
   {
     "Kind": "api",
-    "Value": "openapi.json",
-    "Pattern": "swagger_doc"
-  },
-  {
-    "Kind": "api",
-    "Value": "openapi.yaml",
-    "Pattern": "openapi_yaml"
-  },
-  {
-    "Kind": "api",
-    "Value": "swagger.json",
-    "Pattern": "swagger_doc"
-  },
-  {
-    "Kind": "api",
     "Value": "user-service.intra:8443",
     "Pattern": "internal_host"
-  },
-  {
-    "Kind": "api",
-    "Value": "v1/api-docs",
-    "Pattern": "swagger_doc"
   },
   {
     "Kind": "js",
@@ -176,18 +116,13 @@
   },
   {
     "Kind": "js",
-    "Value": "_nuxt/entry.0987.mjs",
+    "Value": "/_nuxt/entry.0987.mjs",
     "Pattern": "nuxt_chunks"
   },
   {
     "Kind": "js",
     "Value": "app.123.js",
     "Pattern": "js_2"
-  },
-  {
-    "Kind": "static",
-    "Value": "/_nuxt/entry.0987.mjs",
-    "Pattern": "static_2"
   },
   {
     "Kind": "static",

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -131,9 +132,9 @@ func diffFound(t *testing.T, got, want []Found, fixture, wantPath string) {
 	b.WriteString("\n  want file: ")
 	b.WriteString(wantPath)
 	b.WriteString("\n  got ")
-	b.WriteString(itoa(len(got)))
+	b.WriteString(strconv.Itoa(len(got)))
 	b.WriteString(" entries, want ")
-	b.WriteString(itoa(len(want)))
+	b.WriteString(strconv.Itoa(len(want)))
 	b.WriteString(" entries\n")
 
 	if len(extras) > 0 {
@@ -158,28 +159,4 @@ func diffFound(t *testing.T, got, want []Found, fixture, wantPath string) {
 
 func formatFound(f Found) string {
 	return "kind=" + f.Kind + " pattern=" + f.Pattern + " value=" + f.Value
-}
-
-// itoa is a tiny non-allocating int->string used only for diff output.
-// strconv would also work; this keeps the dependency surface minimal.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }

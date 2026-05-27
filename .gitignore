@@ -4,6 +4,8 @@
 /getjsurlscan.exe
 /results/
 /smoke/
+/bin/
+/dist/
 *.log
 .idea/
 .vscode/
