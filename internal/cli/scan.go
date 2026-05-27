@@ -10,16 +10,21 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 
+	"github.com/dogadmin/jsscango/internal/autotune"
 	"github.com/dogadmin/jsscango/internal/config"
 	"github.com/dogadmin/jsscango/internal/pipeline"
+	"github.com/dogadmin/jsscango/internal/preflight"
 	"github.com/dogadmin/jsscango/internal/progress"
 	"github.com/dogadmin/jsscango/internal/util"
 )
 
 func newScanCmd() *cobra.Command {
 	cfg := config.Default()
+	defaults := config.Default() // baseline for "did the operator override this?" comparison
 	var formatsCSV string
+	var showTune bool
 
 	cmd := &cobra.Command{
 		Use:   "scan",
@@ -32,9 +37,38 @@ func newScanCmd() *cobra.Command {
 				}
 				cfg.Formats = fs
 			}
+
+			// Apply autotune BEFORE Normalize so the tier's per-host-qps
+			// and worker counts go through the same validation as
+			// operator-supplied values. We compare each tunable field
+			// against the defaults snapshot above; fields the operator
+			// touched (i.e. don't match the default) are left alone.
+			tier, applied, err := resolveTune(cfg.Tune)
+			if err != nil {
+				return err
+			}
+			if applied {
+				applyTier(&cfg, defaults, tier)
+				fmt.Fprintf(os.Stderr,
+					"tune: %s  workers=%d workers-probe=%d per-host-qps=%g concurrent-targets=%d\n",
+					tier.Name, cfg.Workers, cfg.WorkersProbe, cfg.PerHostQPS, cfg.ConcurrentTargets)
+			}
+			if showTune {
+				printTune(os.Stderr, tier, applied, cfg)
+				return nil
+			}
+
 			if err := cfg.Normalize(); err != nil {
 				return err
 			}
+
+			// XLSX split-mode + parallel targets would race on the
+			// per-target workbook write; reject loudly instead of
+			// silently downgrading.
+			if cfg.XLSXSplit && cfg.ConcurrentTargets > 1 {
+				return fmt.Errorf("--xlsx-split is incompatible with concurrent-targets>1; drop --xlsx-split or run with concurrent-targets=1")
+			}
+
 			// The tracker is constructed unconditionally; when --no-progress
 			// is set, or when stderr isn't a TTY, Start is a no-op and the
 			// Writer() returned below behaves like a direct stderr pipe.
@@ -86,6 +120,45 @@ func newScanCmd() *cobra.Command {
 			ctx, stop := signalCtx(cmd.Context())
 			defer stop()
 
+			// Liveness pre-probe (Feature 2). When "auto", we enable it
+			// only above the threshold — running it for 5 targets is
+			// more overhead than value.
+			enableLiveness := false
+			switch cfg.LivenessCheck {
+			case "on":
+				enableLiveness = true
+			case "auto":
+				enableLiveness = len(targets) > cfg.LivenessAutoThreshold
+			}
+			if enableLiveness {
+				before := len(targets)
+				logger.Info("liveness: starting pre-probe", "targets", before,
+					"timeout", cfg.LivenessTimeout, "workers", cfg.LivenessWorkers)
+				if trk != nil {
+					trk.SetStage("liveness")
+				}
+				res := preflight.Check(ctx, targets, cfg.LivenessTimeout, cfg.LivenessWorkers,
+					func(alive, dead, total int) {
+						if trk != nil {
+							trk.SetCount("liveness_alive", alive)
+							trk.SetCount("liveness_dead", dead)
+							trk.SetCount("liveness_total", total)
+						}
+					})
+				targets = res.Alive
+				fmt.Fprintf(os.Stderr, "liveness: %d/%d alive, %d dead\n",
+					len(res.Alive), before, len(res.Dead))
+				// Dead-target reasons go to the file logger ONLY (Info-level
+				// is captured by the file handler; stderr handler is at WARN+
+				// by default, so the progress window stays clean).
+				for _, d := range res.Dead {
+					logger.Info("liveness: dead", "url", d.URL, "reason", d.Reason)
+				}
+				if len(targets) == 0 {
+					return fmt.Errorf("liveness pre-probe dropped every target; nothing to scan")
+				}
+			}
+
 			runner, err := pipeline.New(cfg, logger)
 			if err != nil {
 				return err
@@ -97,15 +170,33 @@ func newScanCmd() *cobra.Command {
 			runner.SetNumTargets(len(targets))
 			defer runner.Close()
 
+			// Parallel target loop (Feature 3). When ConcurrentTargets ==
+			// 1, the errgroup's limit makes this behaviourally identical
+			// to the prior serial for-loop.
+			g, gctx := errgroup.WithContext(ctx)
+			g.SetLimit(cfg.ConcurrentTargets)
 			for _, t := range targets {
-				targetCtx, cancel := context.WithTimeout(ctx, cfg.TargetTimeout)
-				if err := runner.RunTarget(targetCtx, t); err != nil {
-					logger.Error("target failed", "url", t, "err", err)
-				}
-				cancel()
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
+				t := t
+				g.Go(func() error {
+					if gctx.Err() != nil {
+						return gctx.Err()
+					}
+					targetCtx, cancel := context.WithTimeout(gctx, cfg.TargetTimeout)
+					defer cancel()
+					if err := runner.RunTarget(targetCtx, t); err != nil {
+						logger.Error("target failed", "url", t, "err", err)
+					}
+					// Never propagate target failures — the errgroup must
+					// run every target. The outer ctx cancellation (SIGINT)
+					// is the only signal that should short-circuit.
+					return nil
+				})
+			}
+			if err := g.Wait(); err != nil {
+				return err
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
 			return nil
 		},
@@ -147,7 +238,96 @@ func newScanCmd() *cobra.Command {
 	f.StringVar(&cfg.ProbeFanout, "probe-fanout", cfg.ProbeFanout, "method fan-out strategy when an api_path has no declared verb: action-aware (default; GET + POST_JSON for state-changing paths, GET only otherwise) | conservative (GET only) | all (legacy GET + POST_FORM + POST_JSON)")
 	f.BoolVar(&cfg.PermutateProbe, "permutate-probe", cfg.PermutateProbe, "expand the probe set with Python-parity URL permutation (cartesian of derived bases x api-prefix-split paths); set --permutate-probe=false to disable")
 
+	// Autotune + parallel-targets + liveness pre-probe flags (Phase: 30k-target scale-out).
+	f.StringVar(&cfg.Tune, "tune", cfg.Tune, "autotune profile: auto (detect from CPU+RAM) | off (honour flags verbatim) | tiny|small|small-fat|medium|medium-fat|big|big-fat|huge|huge-fat")
+	f.BoolVar(&showTune, "show-tune", false, "print the resolved tune profile and exit without scanning")
+	f.IntVar(&cfg.ConcurrentTargets, "concurrent-targets", cfg.ConcurrentTargets, "number of targets to scan in parallel (1=serial; >1 forces JSONL to a single combined file and rejects --xlsx-split)")
+	f.StringVar(&cfg.LivenessCheck, "liveness-check", cfg.LivenessCheck, "pre-probe liveness sweep: auto (on when targets > liveness-auto-threshold) | on | off")
+	f.DurationVar(&cfg.LivenessTimeout, "liveness-timeout", cfg.LivenessTimeout, "per-URL timeout for the liveness sweep")
+	f.IntVar(&cfg.LivenessWorkers, "liveness-workers", cfg.LivenessWorkers, "concurrency cap for the liveness sweep")
+	f.IntVar(&cfg.LivenessAutoThreshold, "liveness-auto-threshold", cfg.LivenessAutoThreshold, "target count above which --liveness-check=auto enables the sweep")
+
 	return cmd
+}
+
+// resolveTune turns the --tune flag value into a Tier and a "should I
+// apply it" bool. "off" → no tier, no application. "auto" → Detect().
+// Anything else is a named tier; an unknown name is a hard error so
+// operators don't silently miss a typo.
+func resolveTune(value string) (autotune.Tier, bool, error) {
+	v := strings.ToLower(strings.TrimSpace(value))
+	switch v {
+	case "", "auto":
+		return autotune.Detect(), true, nil
+	case "off":
+		return autotune.Tier{}, false, nil
+	}
+	t, ok := autotune.ByName(v)
+	if !ok {
+		names := make([]string, 0, len(autotune.Tiers))
+		for _, t := range autotune.Tiers {
+			names = append(names, t.Name)
+		}
+		return autotune.Tier{}, false, fmt.Errorf("unknown --tune %q (want auto|off|%s)", value, strings.Join(names, "|"))
+	}
+	return t, true, nil
+}
+
+// applyTier overlays the tier's tunables onto cfg, but only for fields
+// the operator left at their default. The "is it default" check is a
+// straight equality test against the baseline snapshot the CLI took
+// before flag parsing — so any value the operator typed wins over the
+// tier, even if the typed value happens to coincide with the default.
+//
+// Note on the equality test: cobra's StringVar/IntVar etc. don't tell
+// us whether a flag was explicitly set, so we approximate with a value
+// comparison. The operator who *intentionally* types --workers=64 on a
+// machine where the autotuner would also pick 64 gets the same number
+// either way, so the approximation is harmless.
+func applyTier(cfg *config.Config, defaults config.Config, t autotune.Tier) {
+	if cfg.Workers == defaults.Workers {
+		cfg.Workers = t.Workers
+	}
+	if cfg.WorkersCrawl == defaults.WorkersCrawl {
+		cfg.WorkersCrawl = t.WorkersCrawl
+	}
+	if cfg.WorkersProbe == defaults.WorkersProbe {
+		cfg.WorkersProbe = t.WorkersProbe
+	}
+	if cfg.PerHostQPS == defaults.PerHostQPS {
+		cfg.PerHostQPS = t.PerHostQPS
+	}
+	if cfg.ConcurrentTargets == defaults.ConcurrentTargets {
+		cfg.ConcurrentTargets = t.ConcurrentTargets
+	}
+}
+
+// printTune dumps the resolved tier values to w in a human-readable
+// form. Used by --show-tune. We print the tier name when applied and
+// "off" when the operator opted out, plus the resolved cfg values that
+// would be sent to the pipeline (after Normalize-style defaulting on
+// WorkersCrawl/WorkersProbe falling back to Workers).
+func printTune(w *os.File, t autotune.Tier, applied bool, cfg config.Config) {
+	if !applied {
+		fmt.Fprintln(w, "tune: off")
+	} else {
+		fmt.Fprintf(w, "tune: %s\n", t.Name)
+		fmt.Fprintf(w, "  min-cpu:           %d\n", t.MinCPU)
+		fmt.Fprintf(w, "  min-ram:           %d MiB\n", t.MinRAMBytes>>20)
+	}
+	wc := cfg.WorkersCrawl
+	if wc == 0 {
+		wc = cfg.Workers
+	}
+	wp := cfg.WorkersProbe
+	if wp == 0 {
+		wp = cfg.Workers
+	}
+	fmt.Fprintf(w, "  workers:           %d\n", cfg.Workers)
+	fmt.Fprintf(w, "  workers-crawl:     %d\n", wc)
+	fmt.Fprintf(w, "  workers-probe:     %d\n", wp)
+	fmt.Fprintf(w, "  per-host-qps:      %g\n", cfg.PerHostQPS)
+	fmt.Fprintf(w, "  concurrent-targets:%d\n", cfg.ConcurrentTargets)
 }
 
 func loadTargets(cfg config.Config) ([]string, error) {

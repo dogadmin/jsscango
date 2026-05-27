@@ -111,6 +111,39 @@ type Config struct {
 	// true. Set false to revert to the lean single-base behaviour from
 	// earlier versions.
 	PermutateProbe bool
+
+	// Tune selects an autotune.Tier profile by name, "auto" to let the
+	// host's CPU+RAM pick, or "off" to honour every CLI flag verbatim.
+	// Default "auto". See internal/autotune for the tier table; --show-tune
+	// dumps the resolved choice and exits without scanning.
+	Tune string
+
+	// ConcurrentTargets is how many targets the CLI loop will run in
+	// parallel via errgroup. 1 = serial (legacy behaviour); higher means
+	// the JSONL sink falls back to a single combined report.jsonl at
+	// <OutDir>/report.jsonl and the XLSX sink refuses --xlsx-split.
+	ConcurrentTargets int
+
+	// LivenessCheck controls the pre-flight liveness sweep. "auto" turns
+	// it on whenever target count > LivenessAutoThreshold; "on" forces
+	// it; "off" disables it. Default "auto".
+	LivenessCheck string
+
+	// LivenessTimeout is the per-URL probe budget for the liveness sweep.
+	// Default 3s — short enough to discard tens of thousands of dead
+	// targets in minutes, generous enough to avoid false-negatives on
+	// slow-but-alive servers.
+	LivenessTimeout time.Duration
+
+	// LivenessWorkers is the in-flight concurrency cap for the sweep.
+	// Default 128.
+	LivenessWorkers int
+
+	// LivenessAutoThreshold is the target-count above which "auto" mode
+	// enables the liveness sweep. Below this we skip the sweep (running
+	// it for a handful of targets is more overhead than it saves).
+	// Default 50.
+	LivenessAutoThreshold int
 }
 
 func Default() Config {
@@ -130,6 +163,12 @@ func Default() Config {
 		AncestorRecurseDepth: 2,
 		ProbeFanout:          "action-aware",
 		PermutateProbe:       true,
+		Tune:                 "auto",
+		ConcurrentTargets:    1,
+		LivenessCheck:        "auto",
+		LivenessTimeout:      3 * time.Second,
+		LivenessWorkers:      128,
+		LivenessAutoThreshold: 50,
 	}
 }
 
@@ -180,6 +219,26 @@ func (c *Config) Normalize() error {
 	case "action-aware", "conservative", "all":
 	default:
 		return fmt.Errorf("invalid --probe-fanout %q (want action-aware|conservative|all)", c.ProbeFanout)
+	}
+	if c.ConcurrentTargets <= 0 {
+		c.ConcurrentTargets = 1
+	}
+	switch strings.ToLower(c.LivenessCheck) {
+	case "":
+		c.LivenessCheck = "auto"
+	case "auto", "on", "off":
+		c.LivenessCheck = strings.ToLower(c.LivenessCheck)
+	default:
+		return fmt.Errorf("invalid --liveness-check %q (want auto|on|off)", c.LivenessCheck)
+	}
+	if c.LivenessTimeout <= 0 {
+		c.LivenessTimeout = 3 * time.Second
+	}
+	if c.LivenessWorkers <= 0 {
+		c.LivenessWorkers = 128
+	}
+	if c.LivenessAutoThreshold <= 0 {
+		c.LivenessAutoThreshold = 50
 	}
 	return nil
 }

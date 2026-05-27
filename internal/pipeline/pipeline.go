@@ -84,14 +84,26 @@ func New(cfg config.Config, logger *slog.Logger) (*Pipeline, error) {
 		"blacktext_markers", len(rs.BlackText),
 	)
 
+	// When the CLI loop runs multiple targets in parallel, the JSONL
+	// sink writes a single combined file at OutDir/report.jsonl
+	// (every line carries r.Target) and the XLSX sink stays in
+	// combined mode with Concurrent=true so its Start path is safe.
+	// Split-mode XLSX + ConcurrentTargets>1 is rejected at the CLI
+	// (Normalize-time isn't quite the right place because the CLI
+	// holds the ConcurrentTargets value separate from XLSXSplit; the
+	// scan command does the check before constructing the pipeline).
+	concurrent := cfg.ConcurrentTargets > 1
 	var sinks []output.Sink
 	for _, fm := range cfg.Formats {
 		switch fm {
 		case config.FormatJSONL:
-			sinks = append(sinks, output.NewJSONL(cfg.OutDir))
+			j := output.NewJSONL(cfg.OutDir)
+			j.Combined = concurrent
+			sinks = append(sinks, j)
 		case config.FormatXLSX:
 			x := output.NewXLSX(cfg.OutDir)
 			x.Split = cfg.XLSXSplit
+			x.Concurrent = concurrent
 			sinks = append(sinks, x)
 		}
 	}
@@ -581,14 +593,26 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 }
 
 func buildSinks(cfg config.Config) *output.Multi {
+	// When the CLI loop runs multiple targets in parallel, the JSONL
+	// sink writes a single combined file at OutDir/report.jsonl
+	// (every line carries r.Target) and the XLSX sink stays in
+	// combined mode with Concurrent=true so its Start path is safe.
+	// Split-mode XLSX + ConcurrentTargets>1 is rejected at the CLI
+	// (Normalize-time isn't quite the right place because the CLI
+	// holds the ConcurrentTargets value separate from XLSXSplit; the
+	// scan command does the check before constructing the pipeline).
+	concurrent := cfg.ConcurrentTargets > 1
 	var sinks []output.Sink
 	for _, fm := range cfg.Formats {
 		switch fm {
 		case config.FormatJSONL:
-			sinks = append(sinks, output.NewJSONL(cfg.OutDir))
+			j := output.NewJSONL(cfg.OutDir)
+			j.Combined = concurrent
+			sinks = append(sinks, j)
 		case config.FormatXLSX:
 			x := output.NewXLSX(cfg.OutDir)
 			x.Split = cfg.XLSXSplit
+			x.Concurrent = concurrent
 			sinks = append(sinks, x)
 		}
 	}

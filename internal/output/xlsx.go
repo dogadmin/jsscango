@@ -39,9 +39,15 @@ const (
 type XLSX struct {
 	OutDir string
 	Split  bool // when true, write per-target xlsx instead of one combined file
+	// Concurrent, when true, signals that multiple targets will call
+	// Start simultaneously. In that mode Split MUST be false (the CLI
+	// enforces this) — combined-mode Start just ensures the per-target
+	// subdir exists and never mutates x.folder, so concurrent Starts
+	// are safe.
+	Concurrent bool
 
 	mu     sync.Mutex
-	folder string // current target's folder (per-target subdir)
+	folder string // current target's folder (per-target subdir; combined mode: last started)
 
 	allLoaded      []types.DiscoveredURL
 	js             []types.DiscoveredURL
@@ -69,7 +75,17 @@ func (x *XLSX) Start(_ context.Context, targetFolder string) error {
 		}
 		x.resetBuffers()
 	}
-	x.folder = targetFolder
+	// In concurrent combined mode we don't track a single "current"
+	// folder — every row carries a Target column and the combined
+	// workbook is written at OutDir/report.xlsx in Close. Skipping the
+	// x.folder write removes the only race that could blow up under
+	// parallel Starts. Split-mode concurrent is forbidden by the CLI;
+	// the defensive check below is belt-and-suspenders.
+	if !x.Concurrent {
+		x.folder = targetFolder
+	} else if x.Split {
+		return fmt.Errorf("xlsx: split mode is incompatible with concurrent targets")
+	}
 	return os.MkdirAll(filepath.Join(x.OutDir, targetFolder), 0o755)
 }
 
@@ -161,11 +177,20 @@ func (x *XLSX) Flush() error { return nil }
 func (x *XLSX) Close() error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	if x.folder == "" && len(x.allLoaded)+len(x.apiPaths)+len(x.probes) == 0 {
+	// Nothing buffered AND no folder seen — Pipeline never ran a target,
+	// so there's no workbook to write. Bail without creating an empty
+	// report.xlsx.
+	if x.folder == "" && !x.Concurrent &&
+		len(x.allLoaded)+len(x.js)+len(x.nonJS)+len(x.allJS)+len(x.allStatic)+
+			len(x.apiPaths)+len(x.frontendRoutes)+len(x.probes)+
+			len(x.fingerprintHs)+len(x.sensitiveHs) == 0 {
 		return nil
 	}
 	var name string
 	if x.Split {
+		// Split mode is single-target-at-a-time by design (each Start
+		// rolls over the prior workbook); x.folder is therefore the
+		// last target's folder.
 		name = filepath.Join(x.OutDir, x.folder, "report.xlsx")
 	} else {
 		name = filepath.Join(x.OutDir, "report.xlsx")
