@@ -82,7 +82,13 @@ func MakeUTLSDialer(fingerprint string, insecureSkipVerify bool) func(ctx contex
 		cfg := &utls.Config{
 			ServerName:         host,
 			InsecureSkipVerify: insecureSkipVerify, //nolint:gosec — opt-in via --secure-tls
-			NextProtos:         []string{"h2", "http/1.1"},
+			// NextProtos is overridden by ApplyPreset below, but is also the
+			// fallback for environments that bypass the preset path. Keep it
+			// consistent with the wire-level ALPN forced in forceHTTP1ALPN: the
+			// h2 path is unreachable because of the *tls.Conn type-assertion
+			// bug in net/http's transport when DialTLSContext returns a non-stdlib
+			// conn (utls.UConn). See utls_dialer.go top comment.
+			NextProtos: []string{"http/1.1"},
 		}
 		// Build the parrot from the spec so we can rewrite its ALPN. Using
 		// HelloCustom + ApplyPreset is the documented path for tweaking a

@@ -110,8 +110,10 @@ func parseSourceMap(mapURL string, body []byte) ([]SourceMapSource, error) {
 // abort the crawl.
 //
 // referer is the JS URL that pointed at the map (i.e. the URL whose body
-// contained the sourceMappingURL directive). It is used as the Referer on
-// re-extracted URLs only when a deeper source-of-truth isn't available.
+// contained the sourceMappingURL directive). It is recorded as the Referer
+// on every re-extracted URL — the JS that referenced the map is more
+// useful provenance for consumers than the .map URL itself, and the .map
+// URL is still recoverable from the "sourcemap" Source tag.
 func (c *Crawler) expandSourceMap(ctx context.Context, mapURL, referer string) {
 	sources, err := FetchAndExpand(ctx, c.F, mapURL)
 	if err != nil {
@@ -138,7 +140,7 @@ func (c *Crawler) expandSourceMap(ctx context.Context, mapURL, referer string) {
 					continue
 				}
 				c.emit(types.DiscoveredURL{
-					URL: abs, Referer: mapURL, Kind: types.KindJS, Source: "sourcemap",
+					URL: abs, Referer: referer, Kind: types.KindJS, Source: "sourcemap",
 				})
 			case "static":
 				abs := util.JoinNewURL(scheme, base, root, f.Value)
@@ -146,11 +148,11 @@ func (c *Crawler) expandSourceMap(ctx context.Context, mapURL, referer string) {
 					continue
 				}
 				c.emit(types.DiscoveredURL{
-					URL: abs, Referer: mapURL, Kind: types.KindStatic, Source: "sourcemap",
+					URL: abs, Referer: referer, Kind: types.KindStatic, Source: "sourcemap",
 				})
 			case "api":
 				c.emit(types.DiscoveredURL{
-					URL: f.Value, Referer: mapURL, Kind: types.KindAPIPath, Source: "sourcemap",
+					URL: f.Value, Referer: referer, Kind: types.KindAPIPath, Source: "sourcemap",
 				})
 			}
 		}

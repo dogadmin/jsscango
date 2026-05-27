@@ -89,13 +89,17 @@ func isURLBearingKey(k string) bool {
 // isURLLikeValue applies the junk filter described in the design:
 // drop empty / single-char strings, anything with a newline, and the
 // pseudo-URL schemes (data:, blob:, javascript:) and bare fragments (#...).
-// Leaves the rest alone - the caller wants raw values so downstream
-// stages can decide on probing.
+// Beyond the rejection rules, the value must positively look like a URL:
+// either carry a recognizable scheme (http/https/ws/wss), start with a
+// path indicator (/, ./, ../), or contain a '/' alongside at least one
+// alphabetical character. This keeps bare tokens like "submit", "users",
+// "true" from being promoted to URLs just because they appeared under a
+// URL-bearing key, which otherwise drives wasted probe traffic downstream.
 func isURLLikeValue(s string) bool {
 	if len(s) < 2 {
 		return false
 	}
-	if strings.Contains(s, "\n") {
+	if strings.ContainsAny(s, "\n\r") {
 		return false
 	}
 	low := strings.ToLower(s)
@@ -108,5 +112,27 @@ func isURLLikeValue(s string) bool {
 	if strings.HasPrefix(s, "#") {
 		return false
 	}
-	return true
+	// Accept: full URLs.
+	switch {
+	case strings.HasPrefix(low, "http://"),
+		strings.HasPrefix(low, "https://"),
+		strings.HasPrefix(low, "ws://"),
+		strings.HasPrefix(low, "wss://"):
+		return true
+	}
+	// Accept: root-relative and relative paths.
+	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") {
+		return true
+	}
+	// Accept: anything else containing '/' as long as at least one segment
+	// has an alphabetical character (so "1/2/3" or pure punctuation gets
+	// dropped, but "v1/users" is kept).
+	if strings.Contains(s, "/") {
+		for _, r := range s {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				return true
+			}
+		}
+	}
+	return false
 }

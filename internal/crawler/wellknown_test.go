@@ -104,11 +104,12 @@ Sitemap: https://example.com/sitemap.xml
 		// sitemap.xml — each <loc> is a real page, KindNoJS.
 		{"https://example.com/pageA", types.KindNoJS, "sitemap.xml"},
 		{"https://example.com/pageB", types.KindNoJS, "sitemap.xml"},
-		// openapi.json — doc itself is a static URL hit, paths are
-		// emitted relative (joined by buildProbeURLs in the pipeline).
+		// openapi.json — doc itself is a static URL hit; paths are
+		// now resolved against the target's base (the doc has no
+		// servers[] field) so they emit as fully-qualified URLs.
 		{"https://example.com/openapi.json", types.KindStatic, "wellknown:openapi"},
-		{"/users", types.KindAPIPath, "openapi.json"},
-		{"/users/{id}", types.KindAPIPath, "openapi.json"},
+		{"https://example.com/users", types.KindAPIPath, "openapi.json"},
+		{"https://example.com/users/{id}", types.KindAPIPath, "openapi.json"},
 	}
 	for _, w := range wantURLs {
 		if !containsDiscovered(res.Discovered, w.url, w.kind, w.source) {
@@ -118,9 +119,11 @@ Sitemap: https://example.com/sitemap.xml
 	}
 
 	// --- OpenAPI APIEndpoint entries ---
+	// APIEndpoint.Path is now also a fully-qualified URL (the doc has no
+	// servers[] so it resolves against the target base).
 	wantAPIs := map[string][]string{
-		"/users":      {"GET", "POST"},
-		"/users/{id}": {"GET", "DELETE"},
+		"https://example.com/users":      {"GET", "POST"},
+		"https://example.com/users/{id}": {"GET", "DELETE"},
 	}
 	if len(res.APIPaths) < 2 {
 		t.Fatalf("want >=2 APIPaths, got %d", len(res.APIPaths))
@@ -158,9 +161,10 @@ func TestWellKnown_Probe_SwaggerJSONAlsoParsed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
+	// No host/basePath in the doc → resolves against the target's base.
 	found := false
 	for _, ep := range res.APIPaths {
-		if ep.Path == "/v1/widgets" && ep.Source == "swagger.json" {
+		if ep.Path == "https://api.example.com/v1/widgets" && ep.Source == "swagger.json" {
 			found = true
 			if !methodSetEqual(ep.Methods, []string{"GET"}) {
 				t.Errorf("methods: got %v, want [GET]", ep.Methods)
@@ -245,4 +249,141 @@ func methodSetEqual(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// TestParseOpenAPI_ServersField verifies that when an OpenAPI 3.x doc
+// declares servers[].url, paths are resolved against that server base
+// (which may point at a host completely unrelated to the target).
+func TestParseOpenAPI_ServersField(t *testing.T) {
+	body := []byte(`{
+		"openapi": "3.0.0",
+		"servers": [{"url": "https://api.cdn.example.com/v1"}],
+		"paths": {
+			"/users": {"get": {}}
+		}
+	}`)
+	var gotURLs []types.DiscoveredURL
+	var gotAPIs []APIEndpoint
+	addURL := func(d types.DiscoveredURL) { gotURLs = append(gotURLs, d) }
+	addAPI := func(e APIEndpoint) { gotAPIs = append(gotAPIs, e) }
+	// targetBase is intentionally a DIFFERENT host so we can confirm the
+	// servers[].url wins over it.
+	parseOpenAPI(body, "https://target.example.com/", "https://target.example.com",
+		"/openapi.json", addURL, addAPI)
+	wantURL := "https://api.cdn.example.com/v1/users"
+	if !containsDiscovered(gotURLs, wantURL, types.KindAPIPath, "openapi.json") {
+		t.Errorf("expected discovered URL %q, got %+v", wantURL, gotURLs)
+	}
+	found := false
+	for _, ep := range gotAPIs {
+		if ep.Path == wantURL {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected APIEndpoint.Path == %q, got %+v", wantURL, gotAPIs)
+	}
+}
+
+// TestParseOpenAPI_NoServersUsesTargetBase verifies the fallback when no
+// servers[] field is declared — paths get prefixed with the caller-supplied
+// target base so the JSONL output is a consistent fully-qualified URL.
+func TestParseOpenAPI_NoServersUsesTargetBase(t *testing.T) {
+	body := []byte(`{
+		"openapi": "3.0.0",
+		"paths": {
+			"/users": {"get": {}}
+		}
+	}`)
+	var gotURLs []types.DiscoveredURL
+	var gotAPIs []APIEndpoint
+	addURL := func(d types.DiscoveredURL) { gotURLs = append(gotURLs, d) }
+	addAPI := func(e APIEndpoint) { gotAPIs = append(gotAPIs, e) }
+	parseOpenAPI(body, "https://target.example.com/", "https://target.example.com",
+		"/openapi.json", addURL, addAPI)
+	wantURL := "https://target.example.com/users"
+	if !containsDiscovered(gotURLs, wantURL, types.KindAPIPath, "openapi.json") {
+		t.Errorf("expected discovered URL %q, got %+v", wantURL, gotURLs)
+	}
+	found := false
+	for _, ep := range gotAPIs {
+		if ep.Path == wantURL {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected APIEndpoint.Path == %q, got %+v", wantURL, gotAPIs)
+	}
+}
+
+// TestParseOpenAPI_SwaggerTwoBasePath verifies that a Swagger 2.0 doc's
+// host + basePath + schemes form the resolved base — overriding the
+// caller-supplied target base, since the doc explicitly declares one.
+func TestParseOpenAPI_SwaggerTwoBasePath(t *testing.T) {
+	body := []byte(`{
+		"swagger": "2.0",
+		"host": "api.cdn.example.com",
+		"basePath": "/v1",
+		"schemes": ["https"],
+		"paths": {
+			"/users": {"get": {}}
+		}
+	}`)
+	var gotURLs []types.DiscoveredURL
+	var gotAPIs []APIEndpoint
+	addURL := func(d types.DiscoveredURL) { gotURLs = append(gotURLs, d) }
+	addAPI := func(e APIEndpoint) { gotAPIs = append(gotAPIs, e) }
+	parseOpenAPI(body, "https://target.example.com/", "https://target.example.com",
+		"/swagger.json", addURL, addAPI)
+	wantURL := "https://api.cdn.example.com/v1/users"
+	if !containsDiscovered(gotURLs, wantURL, types.KindAPIPath, "swagger.json") {
+		t.Errorf("expected discovered URL %q, got %+v", wantURL, gotURLs)
+	}
+	found := false
+	for _, ep := range gotAPIs {
+		if ep.Path == wantURL {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected APIEndpoint.Path == %q, got %+v", wantURL, gotAPIs)
+	}
+}
+
+// TestJoinRobotsPath_WildcardCleanup asserts that regex/glob metacharacters
+// surviving the strip don't leak into emitted URLs. The function should
+// either return a clean URL (no "*", "$", "\", "?", no "//" runs) or "".
+func TestJoinRobotsPath_WildcardCleanup(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string // "" means "expect empty (dropped)"
+	}{
+		// Wildcard between path segments collapses the resulting "//".
+		{"wildcard between segments", "/api/*/admin", "https://x.test/api/admin"},
+		// Trailing "$" anchor strips cleanly; "\" mid-string is regex syntax → drop.
+		{"backslash escape drops", `/api/.*\.json$`, ""},
+		// "/$" reduces to "/" after $-strip, which the trim-to-empty guard drops.
+		{"just-anchor reduces empty", "/$", ""},
+		// "?" inside a robots pattern is glob/regex syntax → drop.
+		{"query-like glob drops", "/api/?id=*", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := joinRobotsPath("https://x.test", tc.in)
+			if got != tc.want {
+				t.Errorf("joinRobotsPath(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			// Whichever path is returned, it must not carry metachars or "//".
+			if got != "" {
+				if strings.ContainsAny(got, `*\$`) {
+					t.Errorf("output %q still contains metachars", got)
+				}
+				// Allow "//" only as part of the scheme separator.
+				if strings.Contains(strings.TrimPrefix(strings.TrimPrefix(got, "https://"), "http://"), "//") {
+					t.Errorf("output %q contains // outside the scheme", got)
+				}
+			}
+		})
+	}
 }

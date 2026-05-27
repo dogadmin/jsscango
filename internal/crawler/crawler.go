@@ -33,10 +33,21 @@ type Crawler struct {
 	Emit       func(types.DiscoveredURL)
 }
 
+// jobKind tags a queued job with the action the worker should take when
+// it dequeues it. The zero value is jobFetchJS so existing job{...} literals
+// (which never set kind) remain unchanged in behavior.
+type jobKind uint8
+
+const (
+	jobFetchJS jobKind = iota
+	jobExpandSourceMap
+)
+
 type job struct {
 	url     string
 	referer string
 	depth   uint8
+	kind    jobKind
 }
 
 // Run starts the BFS from `seeds`. It returns when the queue is drained or
@@ -119,6 +130,13 @@ func (c *Crawler) process(ctx context.Context, j job, enqueue func(job)) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Dispatch by job kind. Source-map expansion is the slow, rate-limited
+	// path; running it on a worker goroutine (instead of inline in the BFS
+	// loop) keeps the rest of the pool free to fetch the next JS chunk.
+	if j.kind == jobExpandSourceMap {
+		c.expandSourceMap(ctx, j.url, j.referer)
+		return
+	}
 	resp, err := c.F.Fetch(ctx, fetcher.Request{URL: j.url, Method: fetcher.MethodGET})
 	if err != nil {
 		if c.Logger != nil {
@@ -166,6 +184,13 @@ func (c *Crawler) process(ctx context.Context, j job, enqueue func(job)) {
 	// patterns hidden in the original source surface alongside the minified
 	// matches. We cap recursion (don't re-fetch maps discovered in maps) by
 	// gating on Seen.AddURL for the .map URL itself.
+	//
+	// Previously this called c.expandSourceMap synchronously, which blocked
+	// the BFS worker for the .map fetch (rate-limited) plus the extractor
+	// pass. With a Vite/Webpack target shipping ~80 chunks each carrying a
+	// .map, the worker pool effectively collapsed to per-host-qps serial.
+	// We now enqueue the expansion as a jobExpandSourceMap so it runs on
+	// any free worker, letting other BFS work proceed in parallel.
 	for _, f := range found {
 		if f.Pattern != "sourcemap_ref" {
 			continue
@@ -174,10 +199,16 @@ func (c *Crawler) process(ctx context.Context, j job, enqueue func(job)) {
 		if mapURL == "" {
 			continue
 		}
-		if c.Seen != nil && !c.Seen.AddURL(mapURL) {
-			continue
-		}
-		c.expandSourceMap(ctx, mapURL, j.url)
+		// enqueue gates on c.Seen.AddURL internally, so we get the same
+		// "don't re-fetch maps discovered in maps" behavior as before
+		// without an extra check here (which would double-add the URL
+		// and cause enqueue to no-op on the duplicate).
+		enqueue(job{
+			url:     mapURL,
+			referer: j.url,
+			depth:   j.depth + 1,
+			kind:    jobExpandSourceMap,
+		})
 	}
 }
 

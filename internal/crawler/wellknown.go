@@ -142,7 +142,7 @@ func (w *WellKnown) Probe(ctx context.Context, targetURL string) (Result, error)
 				if len(smBody) == 0 {
 					return nil
 				}
-				parseSitemap(gctx, smBody, sm, targetURL, fetchOne, addURL)
+				parseSitemap(gctx, smBody, sm, targetURL, w.Logger, fetchOne, addURL)
 				return nil
 			})
 		}
@@ -157,7 +157,7 @@ func (w *WellKnown) Probe(ctx context.Context, targetURL string) (Result, error)
 		if len(body) == 0 {
 			return nil
 		}
-		parseSitemap(gctx, body, sm, targetURL, fetchOne, addURL)
+		parseSitemap(gctx, body, sm, targetURL, w.Logger, fetchOne, addURL)
 		return nil
 	})
 
@@ -200,7 +200,7 @@ func (w *WellKnown) Probe(ctx context.Context, targetURL string) (Result, error)
 			addURL(types.DiscoveredURL{
 				URL: u, Referer: targetURL, Kind: types.KindStatic, Source: "wellknown:openapi",
 			})
-			parseOpenAPI(body, targetURL, p, addURL, addAPI)
+			parseOpenAPI(body, targetURL, base, p, addURL, addAPI)
 			return nil
 		})
 	}
@@ -218,7 +218,7 @@ func (w *WellKnown) Probe(ctx context.Context, targetURL string) (Result, error)
 				URL: u, Referer: targetURL, Kind: types.KindAPIPath, Source: "wellknown:actuator",
 			})
 			if p == "/actuator/mappings" {
-				parseActuatorMappings(body, targetURL, addURL, addAPI)
+				parseActuatorMappings(body, targetURL, base, addURL, addAPI)
 			}
 			return nil
 		})
@@ -298,7 +298,9 @@ func parseRobots(body []byte, base, target string, addURL func(types.DiscoveredU
 // joinRobotsPath joins a robots.txt path fragment onto the target base.
 // Strips any wildcard/anchor characters that the directive may use
 // ("*", "$") so the emitted URL is fetch-able. Returns "" when the path
-// reduces to nothing after stripping.
+// reduces to nothing after stripping, contains other regex metacharacters
+// that survive stripping (e.g. "\", "?", mid-string "$"), or is just
+// slashes after wildcard collapse.
 func joinRobotsPath(base, p string) string {
 	p = strings.TrimSpace(p)
 	if p == "" {
@@ -308,7 +310,24 @@ func joinRobotsPath(base, p string) string {
 	p = strings.TrimSuffix(p, "$")
 	p = strings.ReplaceAll(p, "*", "")
 	p = strings.TrimSpace(p)
-	if p == "" || p == "/" {
+	if p == "" {
+		return ""
+	}
+	// Collapse adjacent slash runs left over from "/api/*/admin" → "/api//admin".
+	// Safe to do unconditionally here because joinRobotsPath only handles
+	// the path portion — any scheme prefix is detected later.
+	for strings.Contains(p, "//") {
+		p = strings.ReplaceAll(p, "//", "/")
+	}
+	// Drop entries whose surviving form contains regex metacharacters that
+	// can't appear in a fetch-able URL path. "?" is technically valid as a
+	// query separator, but in a robots.txt pattern it's almost always
+	// regex/glob syntax leaking through, and we'd rather skip than 404.
+	if strings.ContainsAny(p, "\\$?") {
+		return ""
+	}
+	// Drop entries that reduce to nothing after the wildcard collapse.
+	if strings.Trim(p, "/") == "" {
 		return ""
 	}
 	if strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://") {
@@ -348,8 +367,10 @@ type sitemapIndex struct {
 // each <loc> as a KindNoJS discovered URL; <sitemapindex> docs recurse
 // one level via fetchOne. Recursion stops after one level on purpose —
 // adversarial sitemaps are easy to nest into a fork bomb.
+// log is used to surface the "neither shape matched" case — most often a
+// 200-served-as-HTML or gzip body — which would otherwise be silent.
 func parseSitemap(ctx context.Context, body []byte, smURL, target string,
-	fetchOne func(string) []byte, addURL func(types.DiscoveredURL)) {
+	log *slog.Logger, fetchOne func(string) []byte, addURL func(types.DiscoveredURL)) {
 	// Try the urlset shape first.
 	var doc sitemapDoc
 	if err := xml.Unmarshal(body, &doc); err == nil {
@@ -386,6 +407,16 @@ func parseSitemap(ctx context.Context, body []byte, smURL, target string,
 			}
 			recurseSitemap(ctx, loc, target, fetchOne, addURL)
 		}
+		if len(idx.Sitemaps) > 0 {
+			return
+		}
+	}
+
+	// If we got here, neither shape matched. Most likely the body is HTML
+	// (404 served as 200, common on misconfigured WAFs) or gzip-encoded.
+	// Logging is the only signal an operator gets — keep it at Debug.
+	if log != nil {
+		log.Debug("sitemap parse failed; no urlset or sitemapindex root", "url", smURL)
 	}
 }
 
@@ -448,11 +479,24 @@ func parseOpenIDConfig(body []byte, target string, addURL func(types.DiscoveredU
 	}
 }
 
+// openAPIServer is the minimal shape of an entry in OpenAPI 3.x's
+// `servers` array. Only `url` is consumed; `description` / `variables`
+// are ignored.
+type openAPIServer struct {
+	URL string `json:"url"`
+}
+
 // openAPIDoc is the minimal shape we need from an OpenAPI / Swagger
-// document. paths is a map keyed by URL path, valued by an object whose
-// keys are HTTP method names. The rest of the doc is ignored.
+// document. `paths` is a map keyed by URL path, valued by an object whose
+// keys are HTTP method names. `servers` (OpenAPI 3.x) and `host`/
+// `basePath`/`schemes` (Swagger 2.0) declare the base URL the paths are
+// relative to. The rest of the doc is ignored.
 type openAPIDoc struct {
-	Paths map[string]map[string]json.RawMessage `json:"paths"`
+	Servers  []openAPIServer                       `json:"servers,omitempty"`
+	BasePath string                                `json:"basePath,omitempty"` // Swagger 2.0
+	Host     string                                `json:"host,omitempty"`     // Swagger 2.0
+	Schemes  []string                              `json:"schemes,omitempty"`  // Swagger 2.0
+	Paths    map[string]map[string]json.RawMessage `json:"paths"`
 }
 
 // parseOpenAPI walks the "paths" map of an OpenAPI/Swagger doc, emitting
@@ -460,7 +504,15 @@ type openAPIDoc struct {
 // methods. Source is "openapi.json" regardless of which doc URL the body
 // came from — the docURL is recorded only in the discovered URL's Source
 // for debugging.
-func parseOpenAPI(body []byte, target, docPath string,
+//
+// Base resolution order:
+//  1. OpenAPI 3.x `servers[0].url` — absolute URLs override the target.
+//  2. Swagger 2.0 `host` + `basePath` (with `schemes` to pick http/https).
+//  3. Caller-supplied `targetBase` (scheme://host of the target URL).
+//
+// Paths are emitted as fully-resolved URLs in all three cases so consumers
+// downstream see a consistent shape in the JSONL `discovered_url.url` field.
+func parseOpenAPI(body []byte, target, targetBase, docPath string,
 	addURL func(types.DiscoveredURL), addAPI func(APIEndpoint)) {
 	var doc openAPIDoc
 	if err := json.Unmarshal(body, &doc); err != nil {
@@ -473,14 +525,22 @@ func parseOpenAPI(body []byte, target, docPath string,
 	if strings.Contains(docPath, "swagger") {
 		src = "swagger.json"
 	}
+
+	// Compute the effective server base. Empty string falls back to the
+	// caller-supplied target base.
+	serverBase := resolveOpenAPIBase(doc, targetBase)
+
 	for p, methods := range doc.Paths {
 		if p == "" {
 			continue
 		}
-		// Emit the path as a discovered URL — relative paths get joined
-		// in pipeline.buildProbeURLs against the target's base.
+		fullURL := joinServerPath(serverBase, p)
+		// Emit the resolved URL. When serverBase is non-empty this is a
+		// fully-qualified URL (possibly pointing at a host different from
+		// the target). When empty, joinServerPath returns the raw path and
+		// pipeline.buildProbeURLs will join it onto the target's base.
 		addURL(types.DiscoveredURL{
-			URL: p, Referer: target, Kind: types.KindAPIPath, Source: src,
+			URL: fullURL, Referer: target, Kind: types.KindAPIPath, Source: src,
 		})
 		// Collect declared methods. OpenAPI keys are lowercase
 		// ("get", "post", ...); the standard verbs are an open set, but
@@ -492,8 +552,67 @@ func parseOpenAPI(body []byte, target, docPath string,
 				ms = append(ms, strings.ToUpper(m))
 			}
 		}
-		addAPI(APIEndpoint{Path: p, Methods: ms, Source: src})
+		// Store the full URL on the APIEndpoint as well — buildProbeURLs
+		// already handles both absolute URLs and raw paths.
+		addAPI(APIEndpoint{Path: fullURL, Methods: ms, Source: src})
 	}
+}
+
+// resolveOpenAPIBase picks the effective base URL for paths declared in
+// an OpenAPI/Swagger doc. Returns "" when no explicit base is declared in
+// the doc AND the caller didn't supply one — caller is then expected to
+// emit raw paths and rely on downstream joining.
+func resolveOpenAPIBase(doc openAPIDoc, targetBase string) string {
+	// OpenAPI 3.x: servers[0].url is the authoritative base.
+	if len(doc.Servers) > 0 {
+		if u := strings.TrimSpace(doc.Servers[0].URL); u != "" {
+			return strings.TrimRight(u, "/")
+		}
+	}
+	// Swagger 2.0: host + basePath, with scheme picked from schemes[].
+	if doc.Host != "" {
+		scheme := "https"
+		if len(doc.Schemes) > 0 {
+			found := false
+			for _, s := range doc.Schemes {
+				if strings.EqualFold(s, "https") {
+					scheme = "https"
+					found = true
+					break
+				}
+			}
+			if !found {
+				scheme = strings.ToLower(doc.Schemes[0])
+			}
+		}
+		base := scheme + "://" + doc.Host
+		if doc.BasePath != "" {
+			bp := doc.BasePath
+			if !strings.HasPrefix(bp, "/") {
+				bp = "/" + bp
+			}
+			base += strings.TrimRight(bp, "/")
+		}
+		return base
+	}
+	// Fall back to the caller's target base (already scheme://host with no
+	// trailing slash). May be "" when caller passes nothing.
+	return strings.TrimRight(targetBase, "/")
+}
+
+// joinServerPath resolves an OpenAPI path against a base URL declared in
+// the doc's servers[] field (or computed from Swagger 2.0 host/basePath).
+// Returns path unchanged when base is empty (caller-side fallback to
+// target-base joining via pipeline.buildProbeURLs).
+func joinServerPath(base, path string) string {
+	if base == "" {
+		return path
+	}
+	base = strings.TrimRight(base, "/")
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path
 }
 
 // actuatorMappings is the minimal shape extracted from Spring Boot's
@@ -502,21 +621,30 @@ func parseOpenAPI(body []byte, target, docPath string,
 // any "dispatcherServlets" → handler → patterns chain and any flat
 // "mappings" array, falling back to a generic string walk when shape
 // detection fails.
-func parseActuatorMappings(body []byte, target string,
+//
+// base is the resolved target scheme+host (no trailing slash); each
+// emitted path is prefixed with it so consumers see a consistent
+// fully-qualified URL in the JSONL output.
+func parseActuatorMappings(body []byte, target, base string,
 	addURL func(types.DiscoveredURL), addAPI func(APIEndpoint)) {
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return
 	}
+	base = strings.TrimRight(base, "/")
 	emit := func(p string) {
 		p = strings.TrimSpace(p)
 		if p == "" || !strings.HasPrefix(p, "/") {
 			return
 		}
+		fullURL := p
+		if base != "" {
+			fullURL = base + p
+		}
 		addURL(types.DiscoveredURL{
-			URL: p, Referer: target, Kind: types.KindAPIPath, Source: "actuator/mappings",
+			URL: fullURL, Referer: target, Kind: types.KindAPIPath, Source: "actuator/mappings",
 		})
-		addAPI(APIEndpoint{Path: p, Source: "actuator/mappings"})
+		addAPI(APIEndpoint{Path: fullURL, Source: "actuator/mappings"})
 	}
 	// Generic walk: anything that looks like a request mapping ends up
 	// as a slash-prefixed string in the JSON tree. Spring's many shapes
