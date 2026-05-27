@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -116,6 +117,10 @@ func newScanCmd() *cobra.Command {
 			if len(targets) == 0 {
 				return fmt.Errorf("no targets to scan")
 			}
+			totalTargets := len(targets)
+			// Activate the top-row scan-progress line. Until liveness runs,
+			// alive == total (every input target is presumed alive).
+			trk.SetScanProgress(0, totalTargets, totalTargets)
 
 			ctx, stop := signalCtx(cmd.Context())
 			defer stop()
@@ -143,6 +148,10 @@ func newScanCmd() *cobra.Command {
 							trk.SetCount("liveness_alive", alive)
 							trk.SetCount("liveness_dead", dead)
 							trk.SetCount("liveness_total", total)
+							// Mirror running alive count into the
+							// top-row scan progress. done stays 0
+							// during the liveness sweep.
+							trk.SetScanProgress(0, alive, totalTargets)
 						}
 					})
 				targets = res.Alive
@@ -157,6 +166,8 @@ func newScanCmd() *cobra.Command {
 				if len(targets) == 0 {
 					return fmt.Errorf("liveness pre-probe dropped every target; nothing to scan")
 				}
+				// Lock in the final alive count for the rest of the run.
+				trk.SetScanProgress(0, len(targets), totalTargets)
 			}
 
 			runner, err := pipeline.New(cfg, logger)
@@ -169,6 +180,12 @@ func newScanCmd() *cobra.Command {
 			// (fallback off so we don't spray /api across hosts).
 			runner.SetNumTargets(len(targets))
 			defer runner.Close()
+
+			// Per-target completion counter — atomic so concurrent goroutines
+			// can advance it without contention. The latest value is pushed
+			// into the tracker on every target completion.
+			var doneCount atomic.Int64
+			aliveSnapshot := len(targets)
 
 			// Parallel target loop (Feature 3). When ConcurrentTargets ==
 			// 1, the errgroup's limit makes this behaviourally identical
@@ -186,6 +203,8 @@ func newScanCmd() *cobra.Command {
 					if err := runner.RunTarget(targetCtx, t); err != nil {
 						logger.Error("target failed", "url", t, "err", err)
 					}
+					n := doneCount.Add(1)
+					trk.SetScanProgress(int(n), aliveSnapshot, totalTargets)
 					// Never propagate target failures — the errgroup must
 					// run every target. The outer ctx cancellation (SIGINT)
 					// is the only signal that should short-circuit.

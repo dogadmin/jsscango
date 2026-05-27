@@ -35,11 +35,18 @@ var spinnerFrames = []string{
 	"⠏", // ⠏
 }
 
-// ANSI escape that erases the current line and parks the cursor at column 0.
-// We always begin a refresh by writing this, so the tracker overwrites itself
-// in place and slog-pushed lines that go through Writer() can clear the
-// spinner before printing.
-const clearLine = "\x1b[2K\r"
+// ANSI escapes used to manage the live status block.
+//
+//	clearLine — erase the cursor's current row and park at column 0.
+//	cursorUp1 — move the cursor up exactly one row, keeping column.
+//
+// The tracker may render 1 or 2 rows ("scan progress" header + per-stage
+// spinner). On each refresh we clear the previously rendered rows, walk
+// the cursor back to the top of the block, and emit the new block.
+const (
+	clearLine = "\x1b[2K\r"
+	cursorUp1 = "\x1b[1A"
+)
 
 const tickInterval = 120 * time.Millisecond
 
@@ -62,10 +69,14 @@ type Tracker struct {
 	// observed via SetCount, so the rendered line is stable across ticks.
 	counters map[string]int64
 	keys     []string
-	// lastRender holds the most recently rendered line (without the leading
-	// clearLine escape). Writer() needs to know whether anything is on screen
-	// before printing log output so we know to clear first.
-	lastRender string
+	// Scan-level progress (independent of per-stage counters). Shown on a
+	// dedicated line above the spinner when ProgressActive is true.
+	scanTotal, scanAlive, scanDone int
+	scanProgressActive             bool
+	// lastLines remembers how many rows are currently painted on screen,
+	// so Writer()'s pre-write clear and render's redraw both know how far
+	// the cursor needs to walk back.
+	lastLines int
 }
 
 // New creates a Tracker writing to w. TTY detection is via x/term.IsTerminal
@@ -128,10 +139,10 @@ func (t *Tracker) Stop() {
 	}
 	close(stopCh)
 	<-doneCh
-	// Final clear so the terminal cursor lands on a fresh line.
+	// Final clear so the terminal cursor lands on a fresh line — wipes
+	// both the spinner row and the scan-progress row when both were live.
 	t.mu.Lock()
-	_, _ = io.WriteString(t.w, clearLine)
-	t.lastRender = ""
+	t.clearOnScreenLocked()
 	t.mu.Unlock()
 }
 
@@ -160,6 +171,28 @@ func (t *Tracker) SetCount(key string, value int) {
 		t.keys = append(t.keys, key)
 	}
 	t.counters[key] = int64(value)
+	t.mu.Unlock()
+}
+
+// SetScanProgress activates the top-row scan-progress line. Call once with
+// the total target count after loadTargets, again after liveness completes
+// with the alive count, and on every target completion to advance done.
+// Passing total=0 deactivates the line (the spinner stays).
+//
+// done, alive, total are all int — the tracker shows:
+//
+//	存活 <alive>/<total> (<alive/total>%)  完成 <done>/<alive> (<done/alive>%)
+//
+// Both percentages are computed safely when the denominator is 0.
+func (t *Tracker) SetScanProgress(done, alive, total int) {
+	if t == nil || !t.isTTY {
+		return
+	}
+	t.mu.Lock()
+	t.scanDone = done
+	t.scanAlive = alive
+	t.scanTotal = total
+	t.scanProgressActive = total > 0
 	t.mu.Unlock()
 }
 
@@ -201,12 +234,58 @@ func (t *Tracker) render() {
 	if t.stopped {
 		return
 	}
-	line := t.formatLineLocked()
 	t.frame = (t.frame + 1) % len(spinnerFrames)
-	// Always lead with clearLine so partial prior frames or stray log bytes
-	// disappear before the new frame goes down.
-	_, _ = io.WriteString(t.w, clearLine+line)
-	t.lastRender = line
+	var lines []string
+	if t.scanProgressActive {
+		lines = append(lines, t.formatScanLineLocked())
+	}
+	lines = append(lines, t.formatLineLocked())
+	t.clearOnScreenLocked()
+	for i, line := range lines {
+		if i > 0 {
+			_, _ = io.WriteString(t.w, "\n")
+		}
+		_, _ = io.WriteString(t.w, line)
+	}
+	t.lastLines = len(lines)
+}
+
+// clearOnScreenLocked erases the previously-painted rows and returns the
+// cursor to the top-of-block column 0. Caller must hold t.mu. After this
+// returns t.lastLines == 0 — the screen has no live tracker rows.
+func (t *Tracker) clearOnScreenLocked() {
+	if t.lastLines == 0 {
+		return
+	}
+	// Cursor is at the end of the LAST rendered line. Clear it, then walk
+	// up + clear each row above. End with the cursor parked at column 0
+	// of the TOP row, ready for the next paint.
+	_, _ = io.WriteString(t.w, clearLine)
+	for i := 1; i < t.lastLines; i++ {
+		_, _ = io.WriteString(t.w, cursorUp1+clearLine)
+	}
+	t.lastLines = 0
+}
+
+// formatScanLineLocked builds the top-row "scan-level progress" line.
+// Caller must hold t.mu.
+func (t *Tracker) formatScanLineLocked() string {
+	alivePct := pct(t.scanAlive, t.scanTotal)
+	donePct := pct(t.scanDone, t.scanAlive)
+	return fmt.Sprintf(
+		"  存活 %d/%d (%.1f%%)  完成 %d/%d (%.1f%%)",
+		t.scanAlive, t.scanTotal, alivePct,
+		t.scanDone, t.scanAlive, donePct,
+	)
+}
+
+// pct returns 100*num/den, or 0 when den == 0. Avoids the division-by-zero
+// case for un-set counters.
+func pct(num, den int) float64 {
+	if den <= 0 {
+		return 0
+	}
+	return 100 * float64(num) / float64(den)
 }
 
 // formatLineLocked builds the status line. Caller must hold t.mu.
@@ -263,9 +342,10 @@ func (tw *trackerWriter) Write(p []byte) (int, error) {
 	defer t.mu.Unlock()
 	// If the tracker isn't active (non-TTY, or never started, or already
 	// stopped), skip the clear escape - just write the bytes through.
-	if t.isTTY && !t.stopped && t.lastRender != "" {
-		_, _ = io.WriteString(t.w, clearLine)
-		t.lastRender = ""
+	// Otherwise erase the whole rendered block (1 or 2 rows) so the log
+	// line lands on a clean canvas; the next render tick repaints below.
+	if t.isTTY && !t.stopped && t.lastLines > 0 {
+		t.clearOnScreenLocked()
 	}
 	return t.w.Write(p)
 }
