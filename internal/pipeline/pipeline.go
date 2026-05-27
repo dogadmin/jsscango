@@ -105,6 +105,8 @@ func New(cfg config.Config, logger *slog.Logger) (*Pipeline, error) {
 			x.Split = cfg.XLSXSplit
 			x.Concurrent = concurrent
 			sinks = append(sinks, x)
+		case config.FormatCSV:
+			sinks = append(sinks, output.NewCSV(cfg.OutDir))
 		}
 	}
 
@@ -614,6 +616,8 @@ func buildSinks(cfg config.Config) *output.Multi {
 			x.Split = cfg.XLSXSplit
 			x.Concurrent = concurrent
 			sinks = append(sinks, x)
+		case config.FormatCSV:
+			sinks = append(sinks, output.NewCSV(cfg.OutDir))
 		}
 	}
 	return &output.Multi{Sinks: sinks}

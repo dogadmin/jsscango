@@ -222,7 +222,7 @@ func newScanCmd() *cobra.Command {
 	f.BoolVar(&cfg.SecureTLS, "secure-tls", false, "verify TLS certs (default: skip)")
 	f.StringVar(&cfg.TLSFingerprint, "tls-fingerprint", cfg.TLSFingerprint, "TLS ClientHello fingerprint: chrome120|firefox120|safari17|go")
 	f.StringVar(&cfg.RulesFile, "rules", "", "rules YAML override path")
-	f.StringVar(&formatsCSV, "format", "jsonl,xlsx", "output formats: jsonl,xlsx")
+	f.StringVar(&formatsCSV, "format", "jsonl,xlsx", "output formats: jsonl|xlsx|csv (comma-separated). csv writes probes.csv, fingerprints.csv, sensitive.csv at <out>/ — recommended at scale. autotune (--tune=medium+) auto-switches to jsonl,csv when --format is left at default.")
 	f.StringVar(&cfg.OutDir, "out", cfg.OutDir, "output directory")
 	f.BoolVar(&cfg.XLSXSplit, "xlsx-split", false, "write one report.xlsx per target (legacy layout); default: single combined report.xlsx at the output root")
 	f.BoolVar(&cfg.Resume, "resume", false, "resume from state.json if present")
@@ -300,6 +300,31 @@ func applyTier(cfg *config.Config, defaults config.Config, t autotune.Tier) {
 	if cfg.ConcurrentTargets == defaults.ConcurrentTargets {
 		cfg.ConcurrentTargets = t.ConcurrentTargets
 	}
+	// At medium-and-up tiers the operator is scanning enough targets that
+	// the XLSX in-memory model is a liability — switch the output to
+	// streaming CSV unless the operator explicitly set --format. Compare
+	// element-wise against defaults so a deliberate --format=jsonl,xlsx
+	// invocation is respected.
+	if formatsEqual(cfg.Formats, defaults.Formats) {
+		switch t.Name {
+		case "medium", "medium-fat", "big", "big-fat", "huge", "huge-fat":
+			cfg.Formats = []config.Format{config.FormatJSONL, config.FormatCSV}
+		}
+	}
+}
+
+// formatsEqual compares two []Format slices element-wise; order matters.
+// Used by applyTier to detect "operator left --format at the default."
+func formatsEqual(a, b []config.Format) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // printTune dumps the resolved tier values to w in a human-readable

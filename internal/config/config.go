@@ -25,6 +25,13 @@ type Format string
 const (
 	FormatJSONL Format = "jsonl"
 	FormatXLSX  Format = "xlsx"
+	// FormatCSV writes three flat files at <out>/ — probes.csv,
+	// fingerprints.csv (fingerprint + vuln rule hits), sensitive.csv.
+	// Designed for tens-of-thousands-of-target runs where XLSX's
+	// in-memory buffering blows up and the other 7 sheets (URLs / JS /
+	// static / api_paths / frontend_routes) are noise. Streaming
+	// writes; small memory footprint; easy to grep / awk.
+	FormatCSV Format = "csv"
 )
 
 // Config holds every tunable knob; fields map 1:1 to CLI flags. Bound by
@@ -243,7 +250,7 @@ func (c *Config) Normalize() error {
 	return nil
 }
 
-// ParseFormats turns "jsonl,xlsx" into []Format. Unknown tokens error.
+// ParseFormats turns "jsonl,xlsx,csv" into []Format. Unknown tokens error.
 func ParseFormats(s string) ([]Format, error) {
 	if s == "" {
 		return nil, nil
@@ -253,10 +260,10 @@ func ParseFormats(s string) ([]Format, error) {
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		switch Format(p) {
-		case FormatJSONL, FormatXLSX:
+		case FormatJSONL, FormatXLSX, FormatCSV:
 			out = append(out, Format(p))
 		default:
-			return nil, fmt.Errorf("unknown format %q (want jsonl|xlsx)", p)
+			return nil, fmt.Errorf("unknown format %q (want jsonl|xlsx|csv)", p)
 		}
 	}
 	return out, nil
