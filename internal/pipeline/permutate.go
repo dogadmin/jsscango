@@ -37,8 +37,8 @@ const permutateMaxURLLen = 2048
 //
 //  4. Cartesian product: (base_urls ∪ tree_urls) × path_with_api_paths,
 //     then × path_with_no_api_paths. Same-baseDomain filter, length cap,
-//     dedupe against the input apiPaths set and against probe.Target URLs
-//     produced earlier.
+//     internal dedupe; cross-set dedup against primary buildProbeTargets
+//     output is the caller's job (dedupTargets in pipeline.go).
 //
 // Note: the Python self_api_path constant (a list of short tokens like
 // "add", "ls", "0", "1", "to") was intentionally skipped here. Half of
@@ -55,14 +55,10 @@ func PermutateTargets(
 	if target.BaseDomain == "" {
 		return nil
 	}
-	// Dedup helpers across the entire function.
+	// Dedup helper across the entire function — cross-set dedup against
+	// the caller's primary probe-target slice happens in dedupTargets at
+	// the call site in pipeline.go.
 	emittedURL := make(map[string]struct{})
-	// Skip URLs that are already in the input apiPaths set (those were
-	// produced by buildProbeTargets); we don't want to re-emit them.
-	priorPaths := make(map[string]struct{}, len(apiPaths))
-	for _, p := range apiPaths {
-		priorPaths[p] = struct{}{}
-	}
 
 	// --- §A/§B/§C: derive tree_urls / base_urls / path_with_api_urls -----
 	treeURLs := newOrderedStringSet()
@@ -239,18 +235,6 @@ func PermutateTargets(
 			return
 		}
 		if _, seen := emittedURL[u]; seen {
-			return
-		}
-		// Dedup against the raw apiPaths input — if a permuted URL is
-		// equal to an extracted path (e.g. `/auth/login` permuted onto a
-		// base produced the same string the extractor emitted as a full
-		// URL), skip it. priorPaths is checked against the original
-		// extractor strings, not the permuted ones; the cheap correct
-		// check here is "did the primary buildProbeTargets already cover
-		// this exact URL?". The caller dedups across primary+permuted,
-		// so this guard is best-effort: skip when the URL equals one of
-		// the input apiPaths verbatim.
-		if _, ok := priorPaths[u]; ok {
 			return
 		}
 		emittedURL[u] = struct{}{}
