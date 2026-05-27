@@ -80,11 +80,46 @@ Stages per target:
 Prebuilt binaries for linux/darwin/windows × amd64/arm64 are attached to
 each GitHub release: <https://github.com/dogadmin/jsscango/releases>.
 
+```sh
+# example: pick the Linux amd64 binary and put it on PATH
+wget https://github.com/dogadmin/jsscango/releases/latest/download/jsscango_linux_amd64
+chmod +x jsscango_linux_amd64
+sudo mv jsscango_linux_amd64 /usr/local/bin/jsscango
+```
+
 Or build from source (Go 1.22+):
 
 ```sh
 go build -o jsscango ./cmd/getjsurlscan
 ```
+
+### Linux headless-Chrome runtime deps (required for `--chrome=on/auto`)
+
+On a fresh server image the bundled Chromium needs a handful of shared
+libraries. Install them BEFORE the first scan — otherwise every target
+will warn `libgbm.so.1: cannot open shared object file`. Skip this step
+only if you plan to run with `--chrome=off`.
+
+```sh
+# Ubuntu 24.04+ (the t64 suffix is the time_t-64-bit transition)
+apt install -y libgbm1 libnss3 libasound2t64 libxkbcommon0 libxcomposite1 \
+               libxdamage1 libxfixes3 libxrandr2 libxshmfence1 libdrm2 \
+               libpangocairo-1.0-0 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64
+
+# Debian 12 / Ubuntu 22.04 (no t64 suffix)
+apt install -y libgbm1 libnss3 libasound2 libxkbcommon0 libxcomposite1 \
+               libxdamage1 libxfixes3 libxrandr2 libxshmfence1 libdrm2 \
+               libpangocairo-1.0-0 libatk1.0-0 libatk-bridge2.0-0 libcups2
+
+# CentOS / RHEL / Rocky / Alma
+yum install -y nss alsa-lib mesa-libgbm libXcomposite libXdamage libXrandr \
+               libxshmfence pango cups-libs at-spi2-atk
+```
+
+macOS and Windows already ship the graphics stack — no extra install
+needed. If you can't or don't want to install the deps, pass
+`--chrome=off` and the tool will fall back to static `<script src>`
+parsing (still recovers 90% of read-only JS scan signal).
 
 ## Usage
 
@@ -307,21 +342,10 @@ that failed (e.g. delete `state.json`'s `probe` flag and re-run with
 on PATH, otherwise falls back to the static HTML homepage parser. Use
 `--chrome=on` to require it, `--chrome=off` to disable.
 
-When running on minimal Linux containers, install the headless deps:
-
-```sh
-# Ubuntu 24.04+
-apt install -y libgbm1 libnss3 libasound2t64 libxkbcommon0 libxcomposite1 \
-               libxdamage1 libxfixes3 libxrandr2 libxshmfence1 libdrm2 \
-               libpangocairo-1.0-0 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64
-
-# CentOS / RHEL / Rocky
-yum install -y nss alsa-lib mesa-libgbm libXcomposite libXdamage libXrandr \
-               libxshmfence pango cups-libs at-spi2-atk
-```
-
-If you can't install deps, just pass `--chrome=off` — the static
-extractor handles 90% of read-only JS scans on its own.
+The bundled Chromium needs Linux runtime libraries to start — see
+[Linux headless-Chrome runtime deps](#linux-headless-chrome-runtime-deps-required-for---chromeonauto)
+in the Install section above. macOS and Windows have the graphics stack
+preinstalled.
 
 ## Status
 
