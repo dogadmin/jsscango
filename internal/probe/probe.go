@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -23,6 +24,20 @@ import (
 	"github.com/dogadmin/jsscango/internal/types"
 	"github.com/dogadmin/jsscango/internal/util"
 )
+
+// Fan-out strategy names. See methodsFor for the per-strategy behavior.
+const (
+	FanoutAll          = "all"           // legacy: GET + POST_FORM + POST_JSON for every URL without a method hint
+	FanoutActionAware  = "action-aware"  // GET always; add POST_JSON when the path suggests a state-changing action
+	FanoutConservative = "conservative"  // GET only — POST attempts are skipped entirely
+)
+
+// actionWordPattern matches verbs that strongly imply a state-changing
+// endpoint. When the URL's path contains one of these the prober adds a
+// POST_JSON probe in addition to the GET; otherwise GET alone is sent under
+// action-aware fan-out. Tuned for English + pinyin paths common in Chinese
+// SaaS systems; lowercase comparison via case-insensitive flag.
+var actionWordPattern = regexp.MustCompile(`(?i)\b(create|add|insert|new|register|update|edit|set|modify|put|patch|delete|remove|destroy|cancel|reset|save|submit|login|logout|signin|signout|signup|upload|import|export|send|publish|approve|reject|change|enable|disable|toggle|do|exec|run)\b`)
 
 // Prober probes a slice of API URLs with three methods each. Concurrency is
 // bounded by a semaphore (replacing the Python's 300 raw threads + sleep(0.2)
@@ -37,6 +52,9 @@ type Prober struct {
 	Logger     *slog.Logger
 	Emit       func(types.ProbeResult)
 	Parameters []string       // mined params for POST/GET-with-param probes
+	// Fanout selects the method fan-out strategy when Target.Methods is empty.
+	// Empty defaults to FanoutActionAware. See the constants above.
+	Fanout string
 }
 
 // Target is one URL to probe with optional method hints. When Methods is
@@ -127,7 +145,7 @@ func (p *Prober) RunTargets(ctx context.Context, targets []Target) error {
 			}
 			continue
 		}
-		methods := methodsFor(t)
+		methods := methodsFor(t, p.Fanout)
 		for _, m := range methods {
 			m := m
 			if err := sem.Acquire(gctx, 1); err != nil {
@@ -144,34 +162,50 @@ func (p *Prober) RunTargets(ctx context.Context, targets []Target) error {
 	return g.Wait()
 }
 
-// methodsFor decides which methods to fire for a Target. When the Target
-// declared a method hint we honor it (mapped to fetcher.Method where it
-// matches our enum, otherwise passed through as a raw method string for
-// the fetcher to issue). Otherwise we fall back to the three-method
-// fan-out preserved from the original probe semantics.
-func methodsFor(t Target) []fetcher.Method {
-	if len(t.Methods) == 0 {
-		return []fetcher.Method{fetcher.MethodGET, fetcher.MethodPOSTForm, fetcher.MethodPOSTJSON}
-	}
-	out := make([]fetcher.Method, 0, len(t.Methods))
-	seen := make(map[fetcher.Method]struct{}, len(t.Methods))
-	for _, raw := range t.Methods {
-		m := mapDeclaredMethod(raw)
-		if m == "" {
-			continue
+// methodsFor decides which methods to fire for a Target. Precedence:
+//  1. Target.Methods is non-empty → honor the declared hint (one method per
+//     verb, deduplicated, unmappable verbs skipped). This wins regardless of
+//     fan-out strategy.
+//  2. Empty hint + fan-out strategy:
+//       "all"          → GET + POST_FORM + POST_JSON (legacy)
+//       "conservative" → GET only
+//       "action-aware" → GET always; add POST_JSON when the URL path matches
+//                        actionWordPattern (default; empty strategy == this)
+//
+// If the strategy string is unrecognized we fall back to action-aware rather
+// than the noisier legacy three-tuple.
+func methodsFor(t Target, fanout string) []fetcher.Method {
+	if len(t.Methods) > 0 {
+		out := make([]fetcher.Method, 0, len(t.Methods))
+		seen := make(map[fetcher.Method]struct{}, len(t.Methods))
+		for _, raw := range t.Methods {
+			m := mapDeclaredMethod(raw)
+			if m == "" {
+				continue
+			}
+			if _, ok := seen[m]; ok {
+				continue
+			}
+			seen[m] = struct{}{}
+			out = append(out, m)
 		}
-		if _, ok := seen[m]; ok {
-			continue
+		if len(out) > 0 {
+			return out
 		}
-		seen[m] = struct{}{}
-		out = append(out, m)
-	}
-	if len(out) == 0 {
 		// Hint was non-empty but contained only unrecognized verbs — fall
-		// back to the default fan-out rather than firing nothing.
-		return []fetcher.Method{fetcher.MethodGET, fetcher.MethodPOSTForm, fetcher.MethodPOSTJSON}
+		// through to the strategy default rather than firing nothing.
 	}
-	return out
+	switch fanout {
+	case FanoutAll:
+		return []fetcher.Method{fetcher.MethodGET, fetcher.MethodPOSTForm, fetcher.MethodPOSTJSON}
+	case FanoutConservative:
+		return []fetcher.Method{fetcher.MethodGET}
+	default: // FanoutActionAware or empty/unknown
+		if actionWordPattern.MatchString(t.URL) {
+			return []fetcher.Method{fetcher.MethodGET, fetcher.MethodPOSTJSON}
+		}
+		return []fetcher.Method{fetcher.MethodGET}
+	}
 }
 
 // mapDeclaredMethod converts an upper-case HTTP verb (as parsed from JS

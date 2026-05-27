@@ -96,6 +96,13 @@ type Config struct {
 	// index endpoints. 0 disables the stage. 2 is the upper bound the
 	// maintainer recommends — going further is mostly noise.
 	AncestorRecurseDepth int
+
+	// ProbeFanout chooses the method fan-out strategy for URLs without a
+	// declared method hint. Values: "action-aware" (default; GET + POST_JSON
+	// when the path contains a state-changing verb, GET-only otherwise),
+	// "conservative" (GET only — POST attempts skipped entirely), "all"
+	// (legacy three-method GET + POST_FORM + POST_JSON for every path).
+	ProbeFanout string
 }
 
 func Default() Config {
@@ -113,6 +120,7 @@ func Default() Config {
 		UA:                   DefaultUserAgent,
 		TLSFingerprint:       "chrome120",
 		AncestorRecurseDepth: 2,
+		ProbeFanout:          "action-aware",
 	}
 }
 
@@ -156,6 +164,13 @@ func (c *Config) Normalize() error {
 	}
 	if len(c.Formats) == 0 {
 		c.Formats = []Format{FormatJSONL, FormatXLSX}
+	}
+	switch c.ProbeFanout {
+	case "":
+		c.ProbeFanout = "action-aware"
+	case "action-aware", "conservative", "all":
+	default:
+		return fmt.Errorf("invalid --probe-fanout %q (want action-aware|conservative|all)", c.ProbeFanout)
 	}
 	return nil
 }

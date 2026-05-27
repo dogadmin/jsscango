@@ -384,6 +384,7 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			OutDir:    outDir,
 			TargetURL: target.URL,
 			Logger:    p.log,
+			Fanout:    p.cfg.ProbeFanout,
 			Emit: func(r types.ProbeResult) {
 				probeStats.Observe(r)
 				total := liveTotal.Add(1)
@@ -460,6 +461,7 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 					OutDir:    outDir,
 					TargetURL: target.URL,
 					Logger:    p.log,
+					Fanout:    probe.FanoutConservative,
 					Emit: func(r types.ProbeResult) {
 						probeStats.Observe(r)
 						total := liveTotal.Add(1)
