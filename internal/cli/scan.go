@@ -105,6 +105,7 @@ func newScanCmd() *cobra.Command {
 	f.StringVar(&cfg.RulesFile, "rules", "", "rules YAML override path")
 	f.StringVar(&formatsCSV, "format", "jsonl,xlsx", "output formats: jsonl,xlsx")
 	f.StringVar(&cfg.OutDir, "out", cfg.OutDir, "output directory")
+	f.BoolVar(&cfg.XLSXSplit, "xlsx-split", false, "write one report.xlsx per target (legacy layout); default: single combined report.xlsx at the output root")
 	f.BoolVar(&cfg.Resume, "resume", false, "resume from state.json if present")
 	f.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "debug|info|warn|error")
 	f.StringVar(&cfg.LogFile, "log-file", "", "log file path (default stderr)")

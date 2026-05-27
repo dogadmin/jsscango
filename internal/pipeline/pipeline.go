@@ -77,7 +77,9 @@ func New(cfg config.Config, logger *slog.Logger) (*Pipeline, error) {
 		case config.FormatJSONL:
 			sinks = append(sinks, output.NewJSONL(cfg.OutDir))
 		case config.FormatXLSX:
-			sinks = append(sinks, output.NewXLSX(cfg.OutDir))
+			x := output.NewXLSX(cfg.OutDir)
+			x.Split = cfg.XLSXSplit
+			sinks = append(sinks, x)
 		}
 	}
 
@@ -557,7 +559,9 @@ func buildSinks(cfg config.Config) *output.Multi {
 		case config.FormatJSONL:
 			sinks = append(sinks, output.NewJSONL(cfg.OutDir))
 		case config.FormatXLSX:
-			sinks = append(sinks, output.NewXLSX(cfg.OutDir))
+			x := output.NewXLSX(cfg.OutDir)
+			x.Split = cfg.XLSXSplit
+			sinks = append(sinks, x)
 		}
 	}
 	return &output.Multi{Sinks: sinks}

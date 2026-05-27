@@ -65,6 +65,12 @@ type Config struct {
 	OutDir    string
 	Resume    bool
 
+	// XLSXSplit, when true, writes one report.xlsx per target into its own
+	// subdirectory under OutDir (the legacy layout). Default false: a single
+	// combined report.xlsx is written at OutDir/report.xlsx with a Target
+	// column on every sheet.
+	XLSXSplit bool
+
 	LogLevel string
 	LogFile  string
 	Proxy    string

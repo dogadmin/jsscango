@@ -29,15 +29,20 @@ const (
 	sheetSensitiveHits    = "敏感信息检测结果"
 )
 
-// XLSX buffers events in memory per target then writes a multi-sheet workbook
-// at Close. Memory cost is bounded by --max-depth + per-host-qps; for very
-// large crawls this could be hundreds of MiB, which is acceptable.
+// XLSX buffers events in memory and writes a multi-sheet workbook at Close.
+// When Split is false (default) one combined workbook collects rows from
+// every target the pipeline processes and is written to <OutDir>/report.xlsx
+// at the very end; the Target column on every sheet distinguishes them.
+// When Split is true, each Start() flushes the prior target's rows to its
+// own per-target report.xlsx and resets the buffers, preserving the legacy
+// one-xlsx-per-target layout.
 type XLSX struct {
 	OutDir string
+	Split  bool // when true, write per-target xlsx instead of one combined file
 
 	mu     sync.Mutex
-	target string
-	folder string
+	target string // current target (the one Start was last called with)
+	folder string // current target's folder (per-target subdir)
 
 	allLoaded      []types.DiscoveredURL
 	js             []types.DiscoveredURL
@@ -56,10 +61,21 @@ func NewXLSX(outDir string) *XLSX { return &XLSX{OutDir: outDir} }
 func (x *XLSX) Start(_ context.Context, targetFolder string) error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	// Reset per-target buffers field by field; we can't `*x = XLSX{...}`
-	// because that would clobber the held mutex.
+	// In split mode, flushing happens on each new Start (writes the prior
+	// target's workbook, then resets). In combined mode we keep accumulating
+	// across all targets and write only once at Close.
+	if x.Split && x.folder != "" && x.folder != targetFolder {
+		if err := x.writeWorkbook(filepath.Join(x.OutDir, x.folder, "report.xlsx")); err != nil {
+			return err
+		}
+		x.resetBuffers()
+	}
 	x.folder = targetFolder
 	x.target = ""
+	return os.MkdirAll(filepath.Join(x.OutDir, targetFolder), 0o755)
+}
+
+func (x *XLSX) resetBuffers() {
 	x.allLoaded = nil
 	x.js = nil
 	x.nonJS = nil
@@ -70,7 +86,6 @@ func (x *XLSX) Start(_ context.Context, targetFolder string) error {
 	x.probes = nil
 	x.fingerprintHs = nil
 	x.sensitiveHs = nil
-	return os.MkdirAll(filepath.Join(x.OutDir, targetFolder), 0o755)
 }
 
 func (x *XLSX) Write(r types.Report) error {
@@ -84,47 +99,63 @@ func (x *XLSX) Write(r types.Report) error {
 		if r.URL == nil {
 			return nil
 		}
-		x.allLoaded = append(x.allLoaded, *r.URL)
-		switch r.URL.Source {
+		u := *r.URL
+		if u.Target == "" {
+			u.Target = r.Target
+		}
+		x.allLoaded = append(x.allLoaded, u)
+		switch u.Source {
 		case "homepage", "chromedp":
-			switch r.URL.Kind {
+			switch u.Kind {
 			case types.KindJS:
-				x.js = append(x.js, *r.URL)
+				x.js = append(x.js, u)
 			case types.KindNoJS, types.KindBaseURL:
-				x.nonJS = append(x.nonJS, *r.URL)
+				x.nonJS = append(x.nonJS, u)
 			}
 		}
-		switch r.URL.Kind {
+		switch u.Kind {
 		case types.KindJS:
-			x.allJS = append(x.allJS, *r.URL)
+			x.allJS = append(x.allJS, u)
 		case types.KindStatic:
-			x.allStatic = append(x.allStatic, *r.URL)
+			x.allStatic = append(x.allStatic, u)
 		}
 	case "api_path":
 		if r.API != nil {
-			x.apiPaths = append(x.apiPaths, *r.API)
+			a := *r.API
+			if a.Target == "" {
+				a.Target = r.Target
+			}
+			x.apiPaths = append(x.apiPaths, a)
 		}
 	case "frontend_route":
-		// Pipeline emits one frontend_route event per Vue Router /
-		// SPA-router path. Captured into its own sheet so the operator
-		// can spot the routes the chromedp recursion should navigate to
-		// without having to grep through the discovered_url stream.
 		if r.URL != nil {
-			x.frontendRoutes = append(x.frontendRoutes, *r.URL)
+			u := *r.URL
+			if u.Target == "" {
+				u.Target = r.Target
+			}
+			x.frontendRoutes = append(x.frontendRoutes, u)
 		}
 	case "probe":
 		if r.Probe != nil && r.Probe.Kept {
-			x.probes = append(x.probes, *r.Probe)
+			pr := *r.Probe
+			if pr.Target == "" {
+				pr.Target = r.Target
+			}
+			x.probes = append(x.probes, pr)
 		}
 	case "rule_hit":
 		if r.Hit == nil {
 			return nil
 		}
-		switch r.Hit.Kind {
+		h := *r.Hit
+		if h.Target == "" {
+			h.Target = r.Target
+		}
+		switch h.Kind {
 		case "sensitive":
-			x.sensitiveHs = append(x.sensitiveHs, *r.Hit)
+			x.sensitiveHs = append(x.sensitiveHs, h)
 		default: // fingerprint, vuln, anything else
-			x.fingerprintHs = append(x.fingerprintHs, *r.Hit)
+			x.fingerprintHs = append(x.fingerprintHs, h)
 		}
 	}
 	return nil
@@ -135,10 +166,24 @@ func (x *XLSX) Flush() error { return nil }
 func (x *XLSX) Close() error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	if x.folder == "" {
+	if x.folder == "" && len(x.allLoaded)+len(x.apiPaths)+len(x.probes) == 0 {
 		return nil
 	}
+	var name string
+	if x.Split {
+		name = filepath.Join(x.OutDir, x.folder, "report.xlsx")
+	} else {
+		name = filepath.Join(x.OutDir, "report.xlsx")
+		if err := os.MkdirAll(x.OutDir, 0o755); err != nil {
+			return err
+		}
+	}
+	return x.writeWorkbook(name)
+}
 
+// writeWorkbook serializes the currently-buffered rows to the given path.
+// Caller must hold x.mu.
+func (x *XLSX) writeWorkbook(name string) error {
 	f := excelize.NewFile()
 	defer f.Close()
 	// excelize creates a default "Sheet1" — we'll replace it with our first
@@ -161,7 +206,6 @@ func (x *XLSX) Close() error {
 		_ = f.DeleteSheet(defaultSheet)
 	}
 
-	name := filepath.Join(x.OutDir, x.folder, "report.xlsx")
 	if err := f.SaveAs(name); err != nil {
 		return fmt.Errorf("save xlsx: %w", err)
 	}
@@ -169,17 +213,14 @@ func (x *XLSX) Close() error {
 }
 
 func writeDiscoveredSheet(f *excelize.File, name string, rows []types.DiscoveredURL) {
-	idx, err := f.NewSheet(name)
-	if err != nil {
+	if _, err := f.NewSheet(name); err != nil {
 		return
 	}
-	if idx == 0 {
-		// already exists / failed; nothing to do
-	}
-	header := []interface{}{"URL", "Kind", "Referer", "Source", "Depth"}
+	header := []interface{}{"Target", "URL", "Kind", "Referer", "Source", "Depth"}
 	_ = f.SetSheetRow(name, "A1", &header)
 	for i, r := range rows {
 		row := []interface{}{
+			sanitizeXLSXCell(r.Target),
 			sanitizeXLSXCell(r.URL),
 			r.Kind.String(),
 			sanitizeXLSXCell(r.Referer),
@@ -194,11 +235,13 @@ func writeAPISheet(f *excelize.File, name string, rows []types.APIPath) {
 	if _, err := f.NewSheet(name); err != nil {
 		return
 	}
-	header := []interface{}{"API Path", "Referer", "Pattern"}
+	header := []interface{}{"Target", "API Path", "Method", "Referer", "Pattern"}
 	_ = f.SetSheetRow(name, "A1", &header)
 	for i, r := range rows {
 		row := []interface{}{
+			sanitizeXLSXCell(r.Target),
 			sanitizeXLSXCell(r.Path),
+			r.Method,
 			sanitizeXLSXCell(r.Referer),
 			r.Pattern,
 		}
@@ -231,12 +274,11 @@ func writeProbeSheet(f *excelize.File, name string, rows []types.ProbeResult) {
 	if _, err := f.NewSheet(name); err != nil {
 		return
 	}
-	// Source is appended at the end so existing consumers (chuli.py et al.)
-	// keep their column indices stable; new tooling can read column I.
-	header := []interface{}{"URL", "Method", "Status", "Content-Type", "Size", "Body Path", "SHA256", "Duplicate", "Source"}
+	header := []interface{}{"Target", "URL", "Method", "Status", "Content-Type", "Size", "Body Path", "SHA256", "Duplicate", "Source"}
 	_ = f.SetSheetRow(name, "A1", &header)
 	for i, r := range rows {
 		row := []interface{}{
+			sanitizeXLSXCell(r.Target),
 			sanitizeXLSXCell(r.URL),
 			r.Method,
 			r.StatusCode,
@@ -255,10 +297,11 @@ func writeRuleSheet(f *excelize.File, name string, rows []types.RuleHit) {
 	if _, err := f.NewSheet(name); err != nil {
 		return
 	}
-	header := []interface{}{"Rule ID", "Kind", "Group", "Matches", "File", "URL"}
+	header := []interface{}{"Target", "Rule ID", "Kind", "Group", "Matches", "File", "URL"}
 	_ = f.SetSheetRow(name, "A1", &header)
 	for i, r := range rows {
 		row := []interface{}{
+			sanitizeXLSXCell(r.Target),
 			r.RuleID,
 			r.Kind,
 			r.Group,
