@@ -1,8 +1,11 @@
 package extractor
 
+import "github.com/dogadmin/jsscango/internal/util/aho"
+
 // Mirrors the lists in plugins/nodeCommon.py and plugins/jsAndStaticUrlFind.py.
 // Keep these as plain slices — the patterns_*.go file applies them through
-// hot-path Postfilt functions, which use map / slices.Contains.
+// hot-path Postfilt functions. The substring blacklist also has an
+// Aho-Corasick matcher built from it for fast scanning.
 
 // DomainBlacklist — third-party domains we never crawl (jsAndStaticUrlFind.py:10).
 var DomainBlacklist = []string{
@@ -17,6 +20,10 @@ var URLSubstrBlacklist = []string{
 	"<", ">", "{", "}", "[", "]", "|", "^", ";",
 	"/js/", "location.href", "javascript:void",
 }
+
+// urlSubstrMatcher accelerates the URL-blacklist substring check used by
+// apiURLFilter. Single AC scan replaces the 21-string linear loop.
+var urlSubstrMatcher = aho.New(URLSubstrBlacklist)
 
 // FileExtBlacklist — file extensions that disqualify a candidate API path.
 // Derived from nodeCommon.py:34-35, with the leading dot.

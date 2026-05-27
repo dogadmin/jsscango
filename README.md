@@ -82,7 +82,41 @@ when `Probe.Kept == true`).
 - Phase 1: skeleton + HTTP fetcher + crawler + JSONL — done.
 - Phase 2: probe + rules engine + xlsx — done.
 - Phase 3: chromedp headless + resume — done.
-- Phase 4: extractor optimisations (union regex, Aho-Corasick, streaming) — pending.
+- Phase 4: Aho-Corasick on 3 hot paths + new framework patterns + pprof — done.
+- Phase 5 (deferred): union regex single-pass extractor + streaming bodies for >4 MiB.
+
+### Phase 4 specifics
+
+- **Aho-Corasick** (`internal/util/aho`) replaces three linear "any-of-N" scans:
+  the 246-entry MIME literal blacklist, the 21-entry URL substring blacklist,
+  and the 68-entry BLACK_TEXT response-body marker list. The matcher is built
+  once per process / per rule load. Benchmark vs `strings.Contains` shows a
+  ~1.7× win on a small-pattern / known-hit corpus; on the more typical
+  "no-marker present" case the speedup is larger because we walk the body
+  once rather than N times.
+
+- **New URL-discovery patterns** (`internal/extractor/patterns_extra.go`)
+  add 10 framework-specific endpoint shapes to the generic JS/static/API
+  regexes:
+
+  | ID | What it catches |
+  |---|---|
+  | `swagger_doc` / `openapi_yaml` | Swagger UI + OpenAPI 3.x descriptors |
+  | `graphql_ep` | `/graphql`, `/gql`, `/api/graphql` |
+  | `sourcemap_ref` | `//# sourceMappingURL=…` references |
+  | `actuator_endpoint` | Spring Boot Actuator paths |
+  | `eureka_endpoint` | Spring Cloud Eureka apps API |
+  | `vite_manifest` | Vite build asset map |
+  | `nuxt_chunks` | Nuxt 3 `_nuxt/…` bundle URLs |
+  | `nextjs_build` | Next.js build-ID-bearing manifest URLs |
+  | `rpc_scheme` | `grpc://`, `dubbo://`, `nacos://`, … |
+  | `internal_host` | localhost / RFC1918 / `*.internal` etc. |
+
+  Extras run before the generic regexes so dedup keeps the more specific
+  pattern ID for diagnostics.
+
+- **pprof** is opt-in via `--pprof :6060`. Disabled by default; when on,
+  the standard `/debug/pprof/*` handlers are served on the given address.
 
 `--chrome=auto` (default) uses chromedp when a Chrome/Chromium binary is on
 PATH, otherwise falls back to the static HTML homepage parser. Use

@@ -15,11 +15,22 @@ type Found struct {
 }
 
 // FromJSBody scans body and emits JS URLs, static URLs, webpack chunks,
-// and API path candidates. This is the central one-pass extraction; in
-// Phase 4 we'll combine the regexes into a union for fewer scans.
+// and API path candidates.
+//
+// Pattern order matters because dedupFound keeps the first occurrence of
+// each (kind, value). The Phase 4 framework-specific patterns
+// (patterns_extra.go) therefore run BEFORE the generic JS/static/API
+// regexes so e.g. /_next/static/.../_buildManifest.js is reported with the
+// "nextjs_build" pattern ID rather than the anonymous "js_1".
 func FromJSBody(body []byte) []Found {
 	text := string(body)
 	out := make([]Found, 0, 64)
+
+	out = append(out, runExtraPatterns(text)...)
+
+	for _, chunk := range webpackChunks(text) {
+		out = append(out, Found{Kind: "js", Value: chunk, Pattern: "webpack_chunk"})
+	}
 
 	for i, re := range jsPatterns {
 		for _, m := range re.FindAllString(text, -1) {
@@ -35,10 +46,6 @@ func FromJSBody(body []byte) []Found {
 				out = append(out, Found{Kind: "static", Value: v, Pattern: staticPatternID(i)})
 			}
 		}
-	}
-
-	for _, chunk := range webpackChunks(text) {
-		out = append(out, Found{Kind: "js", Value: chunk, Pattern: "webpack_chunk"})
 	}
 
 	out = append(out, runAPIPatterns(text)...)
@@ -150,10 +157,8 @@ func apiURLFilter(s string) (string, bool) {
 	if s == "href" || s == "" {
 		return "", false
 	}
-	for _, bl := range URLSubstrBlacklist {
-		if strings.Contains(s, bl) {
-			return "", false
-		}
+	if urlSubstrMatcher.ContainsString(s) {
+		return "", false
 	}
 	base := s
 	if i := strings.IndexByte(s, '?'); i >= 0 {

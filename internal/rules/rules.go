@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dogadmin/jsscango/internal/util/aho"
 )
 
 //go:embed embedded/rules.yaml embedded/blacktext.yaml
@@ -44,7 +45,8 @@ func (r Rule) IsEnabled() bool { return r.Enabled == nil || *r.Enabled }
 // Set is a loaded + compiled bundle of rules plus the BLACK_TEXT marker list.
 type Set struct {
 	Rules       []*Rule
-	BlackText   []string // literal substrings for fast Contains check
+	BlackText   []string // literal substrings (preserved for inspection)
+	blackTextAC *aho.Matcher
 	compileErrs map[string]error
 }
 
@@ -96,6 +98,7 @@ func Load(overridePath string) (*Set, error) {
 
 	set := &Set{
 		BlackText:   bdoc.Markers,
+		blackTextAC: aho.New(bdoc.Markers),
 		compileErrs: make(map[string]error),
 	}
 	for _, r := range doc.Rules {
@@ -159,18 +162,13 @@ func (s *Set) Apply(body []byte) []Hit {
 }
 
 // IsBlackText reports whether body contains any literal marker from the
-// BLACK_TEXT list. Phase 4 will swap this linear scan for Aho-Corasick.
+// BLACK_TEXT list. Backed by an Aho-Corasick matcher (one scan over body
+// regardless of marker count).
 func (s *Set) IsBlackText(body []byte) bool {
-	if len(body) == 0 || s == nil {
+	if s == nil || len(body) == 0 {
 		return false
 	}
-	bs := string(body) // small bodies are typical; large ones are bounded by --max-body-mb
-	for _, m := range s.BlackText {
-		if strings.Contains(bs, m) {
-			return true
-		}
-	}
-	return false
+	return s.blackTextAC.Contains(body)
 }
 
 // Count returns the number of compiled rules per Kind, useful for startup log.

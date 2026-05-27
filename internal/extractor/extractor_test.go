@@ -169,3 +169,78 @@ func containsValue(found []Found, kind, value string) bool {
 	}
 	return false
 }
+
+func containsPattern(found []Found, patternID string) bool {
+	for _, f := range found {
+		if f.Pattern == patternID {
+			return true
+		}
+	}
+	return false
+}
+
+// Phase 4 new patterns coverage.
+
+func TestExtraPatterns_Swagger(t *testing.T) {
+	body := []byte(`location.href = "/v1/api-docs"; var swagger = "/swagger.json";`)
+	got := FromJSBody(body)
+	if !containsPattern(got, "swagger_doc") {
+		t.Errorf("swagger_doc pattern not matched in %+v", got)
+	}
+}
+
+func TestExtraPatterns_GraphQL(t *testing.T) {
+	body := []byte(`fetch("/graphql"); axios.post("/api/graphql", q);`)
+	got := FromJSBody(body)
+	if !containsPattern(got, "graphql_ep") {
+		t.Errorf("graphql_ep pattern not matched in %+v", got)
+	}
+}
+
+func TestExtraPatterns_Sourcemap(t *testing.T) {
+	body := []byte("function x(){}\n//# sourceMappingURL=app.js.map\n")
+	got := FromJSBody(body)
+	if !containsPattern(got, "sourcemap_ref") {
+		t.Errorf("sourcemap_ref pattern not matched in %+v", got)
+	}
+}
+
+func TestExtraPatterns_NextBuild(t *testing.T) {
+	body := []byte(`s.src = "/_next/static/abcd1234efgh5678/_buildManifest.js";`)
+	got := FromJSBody(body)
+	if !containsPattern(got, "nextjs_build") {
+		t.Errorf("nextjs_build pattern not matched in %+v", got)
+	}
+}
+
+func TestExtraPatterns_NuxtChunks(t *testing.T) {
+	body := []byte(`<script src="/_nuxt/entry.abc1.js"></script>`)
+	got := FromJSBody(body)
+	if !containsPattern(got, "nuxt_chunks") {
+		t.Errorf("nuxt_chunks pattern not matched in %+v", got)
+	}
+}
+
+func TestExtraPatterns_Actuator(t *testing.T) {
+	body := []byte(`var ep = "/actuator/env";`)
+	got := FromJSBody(body)
+	if !containsPattern(got, "actuator_endpoint") {
+		t.Errorf("actuator_endpoint pattern not matched in %+v", got)
+	}
+}
+
+func TestExtraPatterns_InternalHost(t *testing.T) {
+	body := []byte(`var srv = "internal-api.corp:8080"; var dev = "192.168.1.5";`)
+	got := FromJSBody(body)
+	if !containsPattern(got, "internal_host") {
+		t.Errorf("internal_host pattern not matched in %+v", got)
+	}
+}
+
+func TestExtraPatterns_RPCScheme(t *testing.T) {
+	body := []byte(`provider = "dubbo://10.0.0.1:20880/Service"; nacos = "nacos://nacos.intra:8848";`)
+	got := FromJSBody(body)
+	if !containsPattern(got, "rpc_scheme") {
+		t.Errorf("rpc_scheme pattern not matched in %+v", got)
+	}
+}

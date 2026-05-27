@@ -1,6 +1,13 @@
 package extractor
 
-import "strings"
+import (
+	"github.com/dogadmin/jsscango/internal/util/aho"
+)
+
+// contentTypeMatcher is built once from ContentTypeKeys and used by
+// ContainsMIMELike to scan candidate API strings in O(N) instead of
+// O(N * 246).
+var contentTypeMatcher = aho.New(ContentTypeKeys)
 
 // ContentTypeKeys is the literal list of MIME-type substrings from
 // apiPathFind.py:8-245 (contentTypeListPure). When any of these appears inside
@@ -81,14 +88,7 @@ var ContentTypeKeys = []string{
 // MIME literal in ContentTypeKeys. Used as a fast rejection for API-path
 // regex matches per apiPathFind.py:280-281.
 //
-// TODO(phase4): replace this O(246·n) linear scan with an Aho-Corasick
-// matcher built once at process start. Same fix applies to BlackText and
-// URLSubstrBlacklist in blacklists.go.
+// Single Aho-Corasick scan, built once at package init.
 func ContainsMIMELike(s string) bool {
-	for _, key := range ContentTypeKeys {
-		if strings.Contains(s, key) {
-			return true
-		}
-	}
-	return false
+	return contentTypeMatcher.ContainsString(s)
 }

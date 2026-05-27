@@ -59,6 +59,10 @@ type Config struct {
 	LogFile  string
 	Proxy    string
 	UA       string
+
+	// PprofAddr enables a net/http/pprof listener at this address when
+	// non-empty (e.g. ":6060"). Default empty = disabled.
+	PprofAddr string
 }
 
 func Default() Config {

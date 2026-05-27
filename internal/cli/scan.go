@@ -37,6 +37,7 @@ func newScanCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("logger: %w", err)
 			}
+			startPprof(cfg.PprofAddr, logger)
 			targets, err := loadTargets(cfg)
 			if err != nil {
 				return err
@@ -93,6 +94,7 @@ func newScanCmd() *cobra.Command {
 	f.StringVar(&cfg.LogFile, "log-file", "", "log file path (default stderr)")
 	f.StringVar(&cfg.Proxy, "proxy", "", "HTTP(S) proxy URL")
 	f.StringVar(&cfg.UA, "user-agent", cfg.UA, "User-Agent header")
+	f.StringVar(&cfg.PprofAddr, "pprof", "", "enable net/http/pprof on this addr (e.g. :6060); empty disables")
 
 	return cmd
 }
