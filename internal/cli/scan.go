@@ -63,13 +63,17 @@ func newScanCmd() *cobra.Command {
 				}
 				filePath = filepath.Join(cfg.OutDir, "scan.log")
 			}
-			logger, err := util.NewSplitLogger(filePath, cfg.LogLevel, trk.Writer(), stderrLevel)
-			if err != nil {
-				return fmt.Errorf("logger: %w", err)
-			}
+			// Print the log path BEFORE trk.Start() so the spinner doesn't
+			// immediately clear the line on its first render. Operators need
+			// to see where the verbose log lives.
 			if filePath != "" {
 				fmt.Fprintf(os.Stderr, "log: %s\n", filePath)
 			}
+			logger, logCloser, err := util.NewSplitLogger(filePath, cfg.LogLevel, trk.Writer(), stderrLevel)
+			if err != nil {
+				return fmt.Errorf("logger: %w", err)
+			}
+			defer logCloser.Close()
 			startPprof(cfg.PprofAddr, logger)
 			targets, err := loadTargets(cfg)
 			if err != nil {
@@ -174,17 +178,43 @@ func loadTargets(cfg config.Config) ([]string, error) {
 }
 
 // signalCtx wraps ctx with cancellation on SIGINT/SIGTERM. Returns cancel that
-// is safe to call multiple times.
+// is safe to call multiple times. The caller MUST defer the returned cancel
+// so the inner signal goroutine, AfterFunc timer, and signal.Notify
+// registration are all released on a graceful return — otherwise the timer
+// can fire AFTER main returned and skip deferred Pipeline.Close /
+// chromedp.Cancel / sink.Flush calls.
 func signalCtx(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
+	ch1, stop1 := installSignalHandler()
+	done := make(chan struct{})
 	go func() {
-		<-installSignalHandler()
-		// Give in-flight work a few seconds; second signal forces exit.
+		defer stop1()
+		select {
+		case <-ch1:
+		case <-done:
+			return
+		}
+		// First signal: arm a force-exit timer and cancel ctx so in-flight
+		// work drains. Second signal jumps straight to os.Exit.
 		t := time.AfterFunc(5*time.Second, func() { os.Exit(130) })
+		defer t.Stop()
 		cancel()
-		<-installSignalHandler()
-		t.Stop()
-		os.Exit(130)
+		ch2, stop2 := installSignalHandler()
+		defer stop2()
+		select {
+		case <-ch2:
+			os.Exit(130)
+		case <-done:
+			return
+		}
 	}()
-	return ctx, cancel
+	stopAll := func() {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+		cancel()
+	}
+	return ctx, stopAll
 }

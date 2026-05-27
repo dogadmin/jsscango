@@ -63,10 +63,17 @@ func (s *Set) CompileErrors() map[string]error { return s.compileErrs }
 // Load builds a Set using the following precedence (highest first):
 //
 //  1. Explicit overridePath (the --rules CLI flag) - REPLACES the rule set.
-//  2. $JSSCANGO_RULES_PATH env var - REPLACES the rule set.
+//     A parse failure here is fatal — the user asked for this specific file.
+//  2. $JSSCANGO_RULES_PATH env var - REPLACES the rule set. Same fatal
+//     semantics as the flag.
 //  3. The user-config rules.yaml at os.UserConfigDir()/jsscango/rules.yaml.
 //     On first run this file is auto-created from the embedded defaults so
 //     subsequent edits are picked up without re-running `rules dump`.
+//     A parse failure here is NON-fatal — the auto-materialised file is
+//     somewhere between the embedded baseline and a deliberate override,
+//     and a broken edit shouldn't brick the tool. The Set returned in that
+//     case has Source set to "embedded(user-fallback:<reason>)" so the
+//     pipeline log surfaces what happened.
 //  4. Embedded defaults compiled into the binary (final fallback).
 //
 // External overrides REPLACE the rule set; they do not merge.
@@ -82,7 +89,19 @@ func Load(overridePath string) (*Set, error) {
 	// 3. User config path (best-effort auto-create on first run).
 	if userPath, _, err := EnsureUserRulesFile(nil); err == nil && userPath != "" {
 		if _, statErr := os.Stat(userPath); statErr == nil {
-			return loadFromFile(userPath, "user:"+userPath)
+			set, err := loadFromFile(userPath, "user:"+userPath)
+			if err == nil {
+				return set, nil
+			}
+			// Parse failed — degrade to embedded so a broken hand-edit
+			// doesn't brick the tool. The caller's logger will surface
+			// the fallback via Set.Source.
+			fb, fbErr := loadFromEmbedded()
+			if fbErr != nil {
+				return nil, fbErr
+			}
+			fb.Source = fmt.Sprintf("embedded(user-fallback: %v)", err)
+			return fb, nil
 		}
 	}
 	// 4. Embedded.

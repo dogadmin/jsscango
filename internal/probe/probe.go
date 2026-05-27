@@ -102,16 +102,12 @@ type Prober struct {
 // declarations, etc.) — surfacing them lets the prober skip wasted requests
 // AND probe non-default verbs like DELETE / PATCH that the fan-out misses.
 //
-// Source/ParentURL annotate where the target came from. Source is propagated
-// into ProbeResult so output sinks can group probes by origin
-// ("ancestor_recurse" vs primary extraction). ParentURL is set on
-// ancestor-recurse targets and identifies the 2xx hit that produced the
-// ancestor — useful for trace/debug.
+// Source is propagated into ProbeResult so output sinks can group probes by
+// origin ("ancestor_recurse" / "permutate" / "" for primary extraction).
 type Target struct {
-	URL       string
-	Methods   []string // upper-case HTTP verbs; empty -> fan-out fallback
-	Source    string   // optional; "extractor" | "ancestor_recurse" | ...
-	ParentURL string   // optional; when Source=="ancestor_recurse", the URL that produced this ancestor
+	URL     string
+	Methods []string // upper-case HTTP verbs; empty -> fan-out fallback
+	Source  string   // optional; "ancestor_recurse" | "permutate" | ...
 }
 
 // Job is one (url, method, body) tuple to probe.

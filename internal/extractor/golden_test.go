@@ -98,8 +98,8 @@ func sortFound(fs []Found) {
 func diffFound(t *testing.T, got, want []Found, fixture, wantPath string) {
 	t.Helper()
 
-	type key struct{ k, v, p string }
-	keyOf := func(f Found) key { return key{f.Kind, f.Value, f.Pattern} }
+	type key struct{ k, v, p, m string }
+	keyOf := func(f Found) key { return key{f.Kind, f.Value, f.Pattern, f.Method} }
 
 	gotSet := make(map[key]struct{}, len(got))
 	for _, f := range got {

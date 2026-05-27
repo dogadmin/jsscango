@@ -14,10 +14,11 @@ import "regexp"
 var baseURLPatterns = []*regexp.Regexp{
 	// axios.create({ ... baseURL: "/api" ... })
 	// Also matches request.create / http.create / api.create / fetch.create
-	// since some teams alias the factory. The [^}]*? bound keeps us inside
-	// the same object literal — RE2's leftmost-first semantics combined
-	// with the lazy quantifier yields the closest baseURL after the brace.
-	regexp.MustCompile(`\b(?:axios|request|http|api|fetch)\.create\s*\(\s*\{[^}]*?\bbaseURL\s*:\s*['"]([^'"]+)['"]`),
+	// since some teams alias the factory. The `(?:[^{}]|\{[^{}]*\}){0,300}?`
+	// window stays inside the outer object literal while allowing ONE level
+	// of nested braces — needed because real configs sprinkle `headers:{...}`
+	// or `params:{...}` between the opening `{` and `baseURL:`.
+	regexp.MustCompile(`\b(?:axios|request|http|api|fetch)\.create\s*\(\s*\{(?:[^{}]|\{[^{}]*\}){0,300}?\bbaseURL\s*:\s*['"]([^'"]+)['"]`),
 
 	// Minified axios: webpack rewrites `axios.create` to a single-letter
 	// identifier or even `o().create` (factory-returns-object). Catches:
@@ -27,14 +28,14 @@ var baseURLPatterns = []*regexp.Regexp{
 	// We anchor on `.create({ ... baseURL: ... }` since the literal
 	// "baseURL" identifier inside an object literal is a strong axios-
 	// specific signal — non-axios libraries almost never use that exact
-	// member name.
-	regexp.MustCompile(`\b[A-Za-z_$][\w$]*(?:\.\w+|\(\))*\.create\s*\(\s*\{[^}]*?\bbaseURL\s*:\s*['"]([^'"]+)['"]`),
+	// member name. Same one-level-nested-brace allowance as above.
+	regexp.MustCompile(`\b[A-Za-z_$][\w$]*(?:\.\w+|\(\))*\.create\s*\(\s*\{(?:[^{}]|\{[^{}]*\}){0,300}?\bbaseURL\s*:\s*['"]([^'"]+)['"]`),
 
 	// Vue.prototype.$http = axios.create({ baseURL: "/api" })
 	// Captured separately so the Vue 2 idiom is still detected when the
 	// surrounding context doesn't match the bare axios.create form (e.g.
 	// when the prototype assignment runs ahead of the brace).
-	regexp.MustCompile(`\bVue\.prototype\.\$\w+\s*=\s*axios\.create\s*\(\s*\{[^}]*?\bbaseURL\s*:\s*['"]([^'"]+)['"]`),
+	regexp.MustCompile(`\bVue\.prototype\.\$\w+\s*=\s*axios\.create\s*\(\s*\{(?:[^{}]|\{[^{}]*\}){0,300}?\bbaseURL\s*:\s*['"]([^'"]+)['"]`),
 
 	// axios.defaults.baseURL = "/api"
 	// Plus instance.defaults.baseURL / request.defaults.baseURL /

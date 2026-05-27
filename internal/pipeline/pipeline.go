@@ -414,16 +414,18 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			Emit: func(r types.ProbeResult) {
 				probeStats.Observe(r)
 				total := liveTotal.Add(1)
-				kept := liveKept.Load()
-				if r.Kept {
-					kept = liveKept.Add(1)
-				}
 				setCount("probes", int(total))
-				setCount("probes_kept", int(kept))
-				// Record 2xx hits from the PRIMARY stage only (Source=="")
-				// so the ancestor-recurse stage doesn't re-recurse on its
-				// own results — depth is capped at 2 from the original hit.
-				if r.Source == "" && r.StatusCode >= 200 && r.StatusCode < 300 {
+				if r.Kept {
+					kept := liveKept.Add(1)
+					setCount("probes_kept", int(kept))
+				}
+				// Record 2xx hits from anything that isn't itself an
+				// ancestor probe so the ancestor-recurse stage can ascend
+				// from primary + permutate hits alike. The exclusion of
+				// "ancestor_recurse" is the hard stop preventing
+				// recursion-on-recursion; DeriveAncestors already caps
+				// depth from the original hit in one shot.
+				if r.Source != "ancestor_recurse" && r.StatusCode >= 200 && r.StatusCode < 300 {
 					hits2xxMu.Lock()
 					hits2xx = append(hits2xx, r.URL)
 					hits2xxMu.Unlock()
@@ -440,77 +442,77 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			"total", probeStats.Total, "kept", probeStats.Kept,
 			"dup", probeStats.Dup, "skipped", probeStats.Skipped, "failed", probeStats.Failed)
 		_ = resume.Done(state.StageProbe)
+	}
 
-		// --- Stage 4b: ancestor recurse ---------------------------------
-		// For each 2xx hit, ascend up to AncestorRecurseDepth parent paths
-		// and probe them as potential index endpoints. Crucially this stage
-		// does NOT recurse on its own results — hard stop at depth 2 from
-		// the ORIGINAL hit, because DeriveAncestors already returns parents
-		// up to depth in one shot.
-		if p.cfg.AncestorRecurseDepth > 0 && doStage(state.StageAncestorRecurse) {
-			var ancestors []probe.Target
-			seenAncestor := make(map[string]struct{})
-			for _, hit := range hits2xx {
-				parents, err := probe.DeriveAncestors(hit, p.cfg.AncestorRecurseDepth)
-				if err != nil {
-					p.log.Debug("derive ancestors", "url", hit, "err", err)
+	// --- Stage 4b: ancestor recurse -----------------------------------------
+	// Gated independently of StageProbe so --resume after a completed probe
+	// stage can still pick up an interrupted ancestor run (hits2xx will be
+	// empty in that case; the stage no-ops gracefully and marks itself done).
+	// Depth is capped at AncestorRecurseDepth from the ORIGINAL hit in one
+	// shot — there is no recursion-on-recursion (see the r.Source filter
+	// inside the primary Emit above).
+	if !p.cfg.NoProbe && !p.cfg.CollectOnly && p.cfg.AncestorRecurseDepth > 0 && doStage(state.StageAncestorRecurse) {
+		var ancestors []probe.Target
+		seenAncestor := make(map[string]struct{})
+		for _, hit := range hits2xx {
+			parents, err := probe.DeriveAncestors(hit, p.cfg.AncestorRecurseDepth)
+			if err != nil {
+				p.log.Debug("derive ancestors", "url", hit, "err", err)
+				continue
+			}
+			for _, pURL := range parents {
+				if _, ok := seenAncestor[pURL]; ok {
 					continue
 				}
-				for _, pURL := range parents {
-					if _, ok := seenAncestor[pURL]; ok {
-						continue
-					}
-					if _, ok := probedURLs[pURL]; ok {
-						continue
-					}
-					seenAncestor[pURL] = struct{}{}
-					ancestors = append(ancestors, probe.Target{
-						URL:       pURL,
-						Methods:   []string{"GET"}, // index lookups only
-						Source:    "ancestor_recurse",
-						ParentURL: hit,
-					})
+				if _, ok := probedURLs[pURL]; ok {
+					continue
 				}
-			}
-			if len(ancestors) > 0 {
-				setStage(state.StageAncestorRecurse)
-				p.log.Info("stage", "name", state.StageAncestorRecurse, "phase", "start",
-					"ancestors", len(ancestors), "from_2xx", len(hits2xx))
-				emit("stage", types.Report{Stage: state.StageAncestorRecurse})
-				ancStart := time.Now()
-				var ancKept atomic.Int64
-				ancPr := &probe.Prober{
-					F:         p.fetch,
-					Rules:     p.rules,
-					Seen:      seen,
-					Workers:   p.cfg.WorkersProbe,
-					OutDir:    outDir,
-					TargetURL: target.URL,
-					Logger:    p.log,
-					Fanout:    probe.FanoutConservative,
-					Emit: func(r types.ProbeResult) {
-						probeStats.Observe(r)
-						total := liveTotal.Add(1)
-						kept := liveKept.Load()
-						if r.Kept {
-							kept = liveKept.Add(1)
-							ancKept.Add(1)
-						}
-						setCount("probes", int(total))
-						setCount("probes_kept", int(kept))
-						emit("probe", types.Report{Probe: &r})
-					},
-				}
-				if err := ancPr.RunTargets(ctx, ancestors); err != nil {
-					p.log.Warn("ancestor recurse", "err", err)
-				}
-				probeCount = probeStats.Total
-				p.log.Info("stage", "name", state.StageAncestorRecurse, "phase", "done",
-					"elapsed", time.Since(ancStart),
-					"ancestors", len(ancestors), "kept", int(ancKept.Load()))
-				_ = resume.Done(state.StageAncestorRecurse)
+				seenAncestor[pURL] = struct{}{}
+				ancestors = append(ancestors, probe.Target{
+					URL:     pURL,
+					Methods: []string{"GET"}, // index lookups only
+					Source:  "ancestor_recurse",
+				})
 			}
 		}
+		setStage(state.StageAncestorRecurse)
+		if len(ancestors) > 0 {
+			p.log.Info("stage", "name", state.StageAncestorRecurse, "phase", "start",
+				"ancestors", len(ancestors), "from_2xx", len(hits2xx))
+			emit("stage", types.Report{Stage: state.StageAncestorRecurse})
+			ancStart := time.Now()
+			var probeStats probe.Stats
+			var ancTotal, ancKept atomic.Int64
+			ancPr := &probe.Prober{
+				F:         p.fetch,
+				Rules:     p.rules,
+				Seen:      seen,
+				Workers:   p.cfg.WorkersProbe,
+				OutDir:    outDir,
+				TargetURL: target.URL,
+				Logger:    p.log,
+				Emit: func(r types.ProbeResult) {
+					probeStats.Observe(r)
+					total := ancTotal.Add(1)
+					setCount("probes", int(total))
+					if r.Kept {
+						kept := ancKept.Add(1)
+						setCount("probes_kept", int(kept))
+					}
+					emit("probe", types.Report{Probe: &r})
+				},
+			}
+			if err := ancPr.RunTargets(ctx, ancestors); err != nil {
+				p.log.Warn("ancestor recurse", "err", err)
+			}
+			probeCount += probeStats.Total
+			p.log.Info("stage", "name", state.StageAncestorRecurse, "phase", "done",
+				"elapsed", time.Since(ancStart),
+				"ancestors", len(ancestors), "kept", int(ancKept.Load()))
+		} else {
+			p.log.Debug("ancestor recurse: no 2xx hits to ascend from, stage no-op")
+		}
+		_ = resume.Done(state.StageAncestorRecurse)
 	}
 
 	// --- Stage 5: postprocess (rule hits on saved bodies) -----------------
@@ -623,16 +625,22 @@ func buildProbeTargets(
 			return
 		}
 		if s, ok := seen[u]; ok {
-			// Merge any new methods into the existing slot. Empty methods
-			// (the fan-out fallback) trump any prior hint — once we have
-			// seen the URL without a method hint we want the fan-out so
-			// rules cover GET / POST as well as the declared verb.
+			// Merge any new methods into the existing slot. An explicit
+			// hint always wins over no-hint — if the JS source declared
+			// method:"DELETE" we want exactly DELETE, even if a chromedp
+			// XHR observation later added the same URL without a hint.
+			// When the incoming call has no hint, leave the existing slot
+			// untouched (either it already has hints we want to preserve,
+			// or it's also hint-less and the fan-out is already in play).
 			if len(methods) == 0 {
-				out[s.idx].Methods = nil
-				s.methods = nil
 				return
 			}
+			// Incoming has a hint. If the slot was hint-less, promote it
+			// to the incoming methods. Otherwise union them.
 			if out[s.idx].Methods == nil {
+				cp := append([]string(nil), methods...)
+				out[s.idx].Methods = cp
+				s.methods = cp
 				return
 			}
 			for _, m := range methods {

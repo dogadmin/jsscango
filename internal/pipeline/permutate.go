@@ -134,9 +134,23 @@ func PermutateTargets(
 	pathWithAPIPaths := newOrderedStringSet()
 	pathWithNoAPIPaths := newOrderedStringSet()
 	// originHints maps the synthesised post-`api/` path back to the raw
-	// extractor path (the key in apiMethodHints) so method hints survive
-	// the split + cartesian.
+	// extractor path so method hints survive the split + cartesian.
+	//
+	// When two distinct apiPaths split to the same suffix (e.g.
+	// /api/users and /v1/api/users both → /users), the hint is ambiguous:
+	// applying either origin's method to every permuted URL that lands on
+	// that suffix would mis-route the other origin's permutation. We
+	// detect the collision and clear the entry to "" — the cartesian then
+	// emits the URLs without a method hint, letting the prober's
+	// action-aware fan-out cover it safely.
 	originHints := make(map[string]string)
+	setHint := func(suffix, origin string) {
+		if existing, ok := originHints[suffix]; ok && existing != "" && existing != origin {
+			originHints[suffix] = "" // collision → ambiguous; drop hint
+			return
+		}
+		originHints[suffix] = origin
+	}
 	for _, api := range apiPaths {
 		if api == "" || api == "/" || len(api) <= 2 {
 			continue
@@ -155,13 +169,13 @@ func PermutateTargets(
 			afterPath := "/" + after
 			pathWithNoAPIPaths.add(afterPath)
 			if _, ok := apiMethodHints[api]; ok {
-				originHints[afterPath] = api
+				setHint(afterPath, api)
 			}
 		} else {
 			withNoAPI := "/" + strings.TrimLeft(api, "/")
 			pathWithNoAPIPaths.add(withNoAPI)
 			if _, ok := apiMethodHints[api]; ok {
-				originHints[withNoAPI] = api
+				setHint(withNoAPI, api)
 			}
 		}
 	}
@@ -249,7 +263,7 @@ func PermutateTargets(
 		for _, p := range pathWithNoAPIPaths.items() {
 			full := b + p
 			var methods []string
-			if origin, ok := originHints[p]; ok {
+			if origin, ok := originHints[p]; ok && origin != "" {
 				if hint := apiMethodHints[origin]; hint != "" {
 					methods = []string{hint}
 				}
@@ -261,19 +275,32 @@ func PermutateTargets(
 }
 
 // dedupTargets keeps the first occurrence of each URL and preserves that
-// occurrence's Methods (no merging of mismatched hints). The probe.Prober
-// already dedupes via state.Seen, but dedup upstream is cheaper.
+// dedupTargets collapses by URL. When two entries share a URL, prefer the
+// one carrying explicit Methods over a hint-less one; if both have Methods,
+// keep the first occurrence (callers — buildProbeTargets and the permute
+// stage — already deduplicate internally with method-union semantics, so
+// inter-set conflicts here are rare and the first-non-empty wins is safe).
+// The probe.Prober also dedupes via state.Seen, but dedup upstream is
+// cheaper and preserves explicit verbs from the permutation pass even when
+// the primary pass added the same URL as hint-less.
 func dedupTargets(targets []probe.Target) []probe.Target {
-	seen := make(map[string]struct{}, len(targets))
+	type slot struct{ idx int }
+	seen := make(map[string]slot, len(targets))
 	out := make([]probe.Target, 0, len(targets))
 	for _, t := range targets {
 		if t.URL == "" {
 			continue
 		}
-		if _, ok := seen[t.URL]; ok {
+		if s, ok := seen[t.URL]; ok {
+			// A later entry with a non-empty hint replaces an earlier
+			// hint-less entry. Source comes from the first occurrence —
+			// the URL is the only identity key.
+			if len(out[s.idx].Methods) == 0 && len(t.Methods) > 0 {
+				out[s.idx].Methods = append([]string(nil), t.Methods...)
+			}
 			continue
 		}
-		seen[t.URL] = struct{}{}
+		seen[t.URL] = slot{idx: len(out)}
 		out = append(out, t)
 	}
 	return out
