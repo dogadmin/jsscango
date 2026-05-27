@@ -542,15 +542,13 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		RuleHits:       hitCount,
 	}})
 
-	// Per-target xlsx writers need a Close to actually serialize. The
-	// JSONL writer needs Close on shutdown only. Cheap-and-correct: close
-	// the sinks here (each sink Close is idempotent and flushes too), then
-	// re-open them next call to RunTarget via Start.
-	if err := p.sinks.Close(); err != nil {
-		p.log.Warn("close sinks (per target)", "err", err)
+	// Flush sinks at the per-target boundary so the JSONL line buffer hits
+	// disk and the split-mode XLSX writer rolls over to the next workbook.
+	// Real file close is deferred to Pipeline.Close so the combined-XLSX
+	// sink can keep accumulating across every target processed.
+	if err := p.sinks.Flush(); err != nil {
+		p.log.Warn("flush sinks (per target)", "err", err)
 	}
-	// Re-create sinks so subsequent targets start fresh files.
-	p.sinks = buildSinks(p.cfg)
 	return nil
 }
 

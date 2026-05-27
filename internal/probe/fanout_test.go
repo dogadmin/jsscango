@@ -50,19 +50,43 @@ func TestMethodsFor_ActionAwareReadPath(t *testing.T) {
 }
 
 func TestMethodsFor_ActionAwareWritePath(t *testing.T) {
-	// Paths with action words should be GET + POST_JSON.
+	// Paths with action words should be GET + POST_JSON. Mix of slash-,
+	// camelCase-, hyphen-, and digit-bounded action words.
 	cases := []string{
 		"https://x.com/api/user/create",
 		"https://x.com/api/auth/login",
 		"https://x.com/api/leave/submit",
 		"https://x.com/api/user/delete/123",
 		"https://x.com/api/file/upload",
+		"https://x.com/api/user/setPassword",     // camelCase: set + Password
+		"https://x.com/api/order/createOrder",    // camelCase: create + Order
+		"https://x.com/api/item/deleteItem",      // camelCase
+		"https://x.com/api/auth/signin",          // joined form (hyphenated sign-in is a known gap)
+		"https://x.com/api/user_register",        // underscore-separated
+		"https://x.com/api/userDelete",           // action in second camel-half
 	}
 	for _, u := range cases {
 		got := methodsFor(Target{URL: u}, FanoutActionAware)
 		want := []fetcher.Method{fetcher.MethodGET, fetcher.MethodPOSTJSON}
 		if !methodsEqual(got, want) {
 			t.Errorf("%s: got %v, want %v", u, got, want)
+		}
+	}
+}
+
+func TestMethodsFor_ActionAwareIgnoresHost(t *testing.T) {
+	// Action-y looking hostnames should NOT trigger a POST_JSON on every
+	// read-only path under that host. Path-only matching enforces this.
+	cases := []string{
+		"https://login.example.com/api/users",      // host has "login"
+		"https://signin.x.com/api/v2/list",         // host has "signin"
+		"https://reset-prod.example.com/api/items", // host has "reset"
+		"https://update.cdn.net/api/assets",        // host has "update"
+	}
+	for _, u := range cases {
+		got := methodsFor(Target{URL: u}, FanoutActionAware)
+		if len(got) != 1 || got[0] != fetcher.MethodGET {
+			t.Errorf("%s: action word in host should NOT trigger POST; got %v", u, got)
 		}
 	}
 }

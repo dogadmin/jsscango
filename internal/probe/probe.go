@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,12 +33,49 @@ const (
 	FanoutConservative = "conservative"  // GET only — POST attempts are skipped entirely
 )
 
-// actionWordPattern matches verbs that strongly imply a state-changing
-// endpoint. When the URL's path contains one of these the prober adds a
-// POST_JSON probe in addition to the GET; otherwise GET alone is sent under
-// action-aware fan-out. Tuned for English + pinyin paths common in Chinese
-// SaaS systems; lowercase comparison via case-insensitive flag.
-var actionWordPattern = regexp.MustCompile(`(?i)\b(create|add|insert|new|register|update|edit|set|modify|put|patch|delete|remove|destroy|cancel|reset|save|submit|login|logout|signin|signout|signup|upload|import|export|send|publish|approve|reject|change|enable|disable|toggle|do|exec|run)\b`)
+// actionWordSet is the lowercase verb set the action-aware fan-out checks.
+// A path is "action-y" when any token derived from it (camelCase split +
+// non-letter split) matches one of these.
+var actionWordSet = map[string]struct{}{
+	"create": {}, "add": {}, "insert": {}, "new": {}, "register": {},
+	"update": {}, "edit": {}, "set": {}, "modify": {}, "put": {}, "patch": {},
+	"delete": {}, "remove": {}, "destroy": {}, "cancel": {}, "reset": {},
+	"save": {}, "submit": {},
+	"login": {}, "logout": {}, "signin": {}, "signout": {}, "signup": {},
+	"upload": {}, "import": {}, "export": {}, "send": {}, "publish": {},
+	"approve": {}, "reject": {}, "change": {}, "enable": {}, "disable": {},
+	"toggle": {}, "do": {}, "exec": {}, "run": {},
+}
+
+// pathTokenizer splits a URL path into language-aware tokens by emitting
+// runs of [A-Z][a-z]* (PascalCase / camelCase head), [a-z]+ (lowercase run),
+// and [0-9]+ (digits). Slashes, dots, underscores, hyphens, and Chinese
+// characters are skipped between tokens. Together this catches "setUser" /
+// "createOrder" / "auth/login" / "user.save" boundaries that a plain `\b`
+// regex misses on camelCase-only paths (the dominant JS naming style).
+var pathTokenizer = regexp.MustCompile(`[A-Z][a-z]*|[a-z]+|[0-9]+`)
+
+// pathHasActionWord reports whether the path tokens (case-folded) contain a
+// state-changing verb. Only the URL.Path is inspected — host parts and
+// query strings are ignored so a hostname like `login.example.com` doesn't
+// trigger spurious POSTs on every URL under that host.
+func pathHasActionWord(rawURL string) bool {
+	var path string
+	if u, err := url.Parse(rawURL); err == nil {
+		path = u.Path
+	} else {
+		path = rawURL
+	}
+	if path == "" {
+		return false
+	}
+	for _, tok := range pathTokenizer.FindAllString(path, -1) {
+		if _, ok := actionWordSet[strings.ToLower(tok)]; ok {
+			return true
+		}
+	}
+	return false
+}
 
 // Prober probes a slice of API URLs with three methods each. Concurrency is
 // bounded by a semaphore (replacing the Python's 300 raw threads + sleep(0.2)
@@ -201,7 +239,7 @@ func methodsFor(t Target, fanout string) []fetcher.Method {
 	case FanoutConservative:
 		return []fetcher.Method{fetcher.MethodGET}
 	default: // FanoutActionAware or empty/unknown
-		if actionWordPattern.MatchString(t.URL) {
+		if pathHasActionWord(t.URL) {
 			return []fetcher.Method{fetcher.MethodGET, fetcher.MethodPOSTJSON}
 		}
 		return []fetcher.Method{fetcher.MethodGET}

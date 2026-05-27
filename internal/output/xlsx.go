@@ -41,7 +41,6 @@ type XLSX struct {
 	Split  bool // when true, write per-target xlsx instead of one combined file
 
 	mu     sync.Mutex
-	target string // current target (the one Start was last called with)
 	folder string // current target's folder (per-target subdir)
 
 	allLoaded      []types.DiscoveredURL
@@ -71,7 +70,6 @@ func (x *XLSX) Start(_ context.Context, targetFolder string) error {
 		x.resetBuffers()
 	}
 	x.folder = targetFolder
-	x.target = ""
 	return os.MkdirAll(filepath.Join(x.OutDir, targetFolder), 0o755)
 }
 
@@ -91,9 +89,6 @@ func (x *XLSX) resetBuffers() {
 func (x *XLSX) Write(r types.Report) error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	if x.target == "" {
-		x.target = r.Target
-	}
 	switch r.Event {
 	case "discovered_url":
 		if r.URL == nil {

@@ -26,6 +26,17 @@ func NewJSONL(outDir string) *JSONL { return &JSONL{OutDir: outDir} }
 func (j *JSONL) Start(_ context.Context, targetFolder string) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	// Flush + close any prior target's file before opening the next one;
+	// we can't keep the old handle open because each target gets its own
+	// per-folder report.jsonl.
+	if j.writer != nil {
+		_ = j.writer.Flush()
+		j.writer = nil
+	}
+	if j.file != nil {
+		_ = j.file.Close()
+		j.file = nil
+	}
 	dir := filepath.Join(j.OutDir, targetFolder)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)

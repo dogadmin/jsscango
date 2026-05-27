@@ -153,6 +153,7 @@ func (c *Crawler) expandSourceMap(ctx context.Context, mapURL, referer string) {
 			case "api":
 				c.emit(types.DiscoveredURL{
 					URL: f.Value, Referer: referer, Kind: types.KindAPIPath, Source: "sourcemap",
+					Method: f.Method,
 				})
 			case "frontend_route":
 				// Vue Router / SPA-router navigation paths surfaced from a
