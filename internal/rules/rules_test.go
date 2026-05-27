@@ -63,3 +63,23 @@ func ruleIDs(hits []Hit) []string {
 	}
 	return out
 }
+
+func TestEmbeddedFiles(t *testing.T) {
+	files := EmbeddedFiles()
+	for _, name := range []string{"rules.yaml", "blacktext.yaml"} {
+		b, ok := files[name]
+		if !ok {
+			t.Errorf("EmbeddedFiles missing key %q", name)
+			continue
+		}
+		if len(b) == 0 {
+			t.Errorf("EmbeddedFiles[%q] is empty", name)
+		}
+	}
+	if len(EmbeddedRulesYAML()) == 0 {
+		t.Error("EmbeddedRulesYAML returned empty bytes")
+	}
+	if len(EmbeddedBlackTextYAML()) == 0 {
+		t.Error("EmbeddedBlackTextYAML returned empty bytes")
+	}
+}

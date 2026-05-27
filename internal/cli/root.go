@@ -14,6 +14,7 @@ func NewRoot(version string) *cobra.Command {
 	}
 	root.AddCommand(newScanCmd())
 	root.AddCommand(newChromeCmd())
+	root.AddCommand(newRulesCmd())
 	root.AddCommand(newVersionCmd(version))
 	return root
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dogadmin/jsscango/internal/config"
 	"github.com/dogadmin/jsscango/internal/pipeline"
+	"github.com/dogadmin/jsscango/internal/progress"
 	"github.com/dogadmin/jsscango/internal/util"
 )
 
@@ -33,7 +34,19 @@ func newScanCmd() *cobra.Command {
 			if err := cfg.Normalize(); err != nil {
 				return err
 			}
-			logger, err := util.NewLogger(cfg.LogLevel, cfg.LogFile)
+			// The tracker is constructed unconditionally; when --no-progress
+			// is set, or when stderr isn't a TTY, Start is a no-op and the
+			// Writer() returned below behaves like a direct stderr pipe.
+			trk := progress.New(os.Stderr)
+			if !cfg.NoProgress {
+				trk.Start()
+			}
+			defer trk.Stop()
+
+			// Route slog output through the tracker so log lines clear the
+			// spinner before printing. When cfg.LogFile is set, the wrapper
+			// is ignored (file logs aren't TTY).
+			logger, err := util.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFile, trk.Writer())
 			if err != nil {
 				return fmt.Errorf("logger: %w", err)
 			}
@@ -53,6 +66,7 @@ func newScanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			runner.SetTracker(trk)
 			defer runner.Close()
 
 			for _, t := range targets {
@@ -95,6 +109,7 @@ func newScanCmd() *cobra.Command {
 	f.StringVar(&cfg.Proxy, "proxy", "", "HTTP(S) proxy URL")
 	f.StringVar(&cfg.UA, "user-agent", cfg.UA, "User-Agent header")
 	f.StringVar(&cfg.PprofAddr, "pprof", "", "enable net/http/pprof on this addr (e.g. :6060); empty disables")
+	f.BoolVar(&cfg.NoProgress, "no-progress", false, "disable the live status indicator (auto-disabled when stderr isn't a TTY)")
 
 	return cmd
 }

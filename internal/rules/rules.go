@@ -179,3 +179,25 @@ func (s *Set) Count() map[Kind]int {
 	}
 	return out
 }
+
+// EmbeddedRulesYAML returns the bytes of the default rules.yaml.
+func EmbeddedRulesYAML() []byte {
+	b, _ := defaultFS.ReadFile("embedded/rules.yaml")
+	return b
+}
+
+// EmbeddedBlackTextYAML returns the bytes of the default blacktext.yaml.
+func EmbeddedBlackTextYAML() []byte {
+	b, _ := defaultFS.ReadFile("embedded/blacktext.yaml")
+	return b
+}
+
+// EmbeddedFiles returns the embedded asset names with their content, keyed by
+// the plain basename (no "embedded/" prefix). Callers that want to dump the
+// defaults to disk can iterate this map.
+func EmbeddedFiles() map[string][]byte {
+	return map[string][]byte{
+		"rules.yaml":     EmbeddedRulesYAML(),
+		"blacktext.yaml": EmbeddedBlackTextYAML(),
+	}
+}

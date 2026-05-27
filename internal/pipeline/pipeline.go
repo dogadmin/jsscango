@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dogadmin/jsscango/internal/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/dogadmin/jsscango/internal/output"
 	"github.com/dogadmin/jsscango/internal/postprocess"
 	"github.com/dogadmin/jsscango/internal/probe"
+	"github.com/dogadmin/jsscango/internal/progress"
 	"github.com/dogadmin/jsscango/internal/rules"
 	"github.com/dogadmin/jsscango/internal/state"
 	"github.com/dogadmin/jsscango/internal/types"
@@ -33,8 +35,17 @@ type Pipeline struct {
 	sinks    *output.Multi
 	homepage fetcher.HomepageDiscoverer
 	headless *fetcher.Headless // non-nil iff chromedp is in use; closed at Close
+	tracker  *progress.Tracker // optional; nil is treated as a no-op
 	closed   bool
 	mu       sync.Mutex
+}
+
+// SetTracker attaches a progress.Tracker for live status reporting. Passing
+// nil clears any previously attached tracker. Safe to call before RunTarget.
+func (p *Pipeline) SetTracker(t *progress.Tracker) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tracker = t
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*Pipeline, error) {
@@ -154,6 +165,19 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		}
 	}
 
+	// setStage mirrors stage transitions into the live tracker; nil-safe.
+	setStage := func(name string) {
+		if p.tracker != nil {
+			p.tracker.SetStage(name)
+		}
+	}
+	// setCount pushes a counter value into the tracker; nil-safe.
+	setCount := func(key string, value int) {
+		if p.tracker != nil {
+			p.tracker.SetCount(key, value)
+		}
+	}
+
 	seen := state.NewSeen()
 
 	// --- Resume state (--resume) ------------------------------------------
@@ -193,13 +217,20 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		case types.KindAPIPath:
 			stats.apiPaths++
 		}
+		urls := stats.urlsDiscovered
+		js := stats.jsDiscovered
+		apis := stats.apiPaths
 		stats.mu.Unlock()
+		setCount("urls", urls)
+		setCount("js", js)
+		setCount("api_paths", apis)
 		emit("discovered_url", types.Report{URL: &d})
 	}
 
 	// --- Stage 1: homepage -------------------------------------------------
 	var seeds []types.DiscoveredURL
 	if doStage(state.StageHomepage) {
+		setStage(state.StageHomepage)
 		p.log.Info("stage", "name", state.StageHomepage, "phase", "start")
 		emit("stage", types.Report{Stage: state.StageHomepage})
 		stageStart := time.Now()
@@ -207,6 +238,7 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		if err != nil {
 			p.log.Warn("homepage discover", "url", target.URL, "err", err)
 		}
+		setCount("seeds", len(seeds))
 		p.log.Info("stage", "name", state.StageHomepage, "phase", "done",
 			"elapsed", time.Since(stageStart), "seeds", len(seeds))
 		_ = resume.Done(state.StageHomepage)
@@ -224,6 +256,7 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		}
 	}
 	if doStage(state.StageCrawl) {
+		setStage(state.StageCrawl)
 		p.log.Info("stage", "name", state.StageCrawl, "phase", "start",
 			"workers", p.cfg.WorkersCrawl, "max_depth", p.cfg.MaxDepth, "per_host_qps", p.cfg.PerHostQPS)
 		emit("stage", types.Report{Stage: state.StageCrawl})
@@ -261,11 +294,17 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 		// crawler emits full URLs when JS contains absolute API paths, and
 		// the relative ones get prefixed onto the target's scheme+host.
 		urls := buildProbeURLs(target, seeds, apiPathSet.Items())
+		setStage(state.StageProbe)
 		p.log.Info("stage", "name", state.StageProbe, "phase", "start",
 			"urls", len(urls), "workers", p.cfg.WorkersProbe, "per_host_qps", p.cfg.PerHostQPS)
 		emit("stage", types.Report{Stage: state.StageProbe})
 		stageStart := time.Now()
 		var probeStats probe.Stats
+		// Mirror probeStats.Total/Kept into the tracker. probe.Stats keeps
+		// its mutex unexported, so we maintain a parallel atomic pair to
+		// avoid racing the locked Observe writes when probe workers run
+		// concurrently.
+		var liveTotal, liveKept atomic.Int64
 		pr := &probe.Prober{
 			F:         p.fetch,
 			Rules:     p.rules,
@@ -276,6 +315,13 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			Logger:    p.log,
 			Emit: func(r types.ProbeResult) {
 				probeStats.Observe(r)
+				total := liveTotal.Add(1)
+				kept := liveKept.Load()
+				if r.Kept {
+					kept = liveKept.Add(1)
+				}
+				setCount("probes", int(total))
+				setCount("probes_kept", int(kept))
 				emit("probe", types.Report{Probe: &r})
 			},
 		}
@@ -292,10 +338,12 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 
 	// --- Stage 5: postprocess (rule hits on saved bodies) -----------------
 	if !p.cfg.NoProbe && !p.cfg.CollectOnly && doStage(state.StagePostprocess) {
+		setStage(state.StagePostprocess)
 		p.log.Info("stage", "name", state.StagePostprocess, "phase", "start")
 		emit("stage", types.Report{Stage: state.StagePostprocess})
 		stageStart := time.Now()
 		ppStats := postprocess.NewStats()
+		var liveHits atomic.Int64
 		pp := &postprocess.Processor{
 			Rules:   p.rules,
 			Workers: p.cfg.Workers,
@@ -304,6 +352,7 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			Logger:  p.log,
 			Emit: func(h types.RuleHit) {
 				ppStats.Observe(h)
+				setCount("rule_hits", int(liveHits.Add(1)))
 				emit("rule_hit", types.Report{Hit: &h})
 			},
 		}
@@ -322,6 +371,8 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 	resume.SetStat("probes", probeCount)
 	resume.SetStat("rule_hits", hitCount)
 	_ = resume.Finish()
+
+	setStage("done")
 
 	emit("summary", types.Report{Summary: &types.Summary{
 		DurationMS:     time.Since(start).Milliseconds(),

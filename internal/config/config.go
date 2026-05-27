@@ -63,6 +63,11 @@ type Config struct {
 	// PprofAddr enables a net/http/pprof listener at this address when
 	// non-empty (e.g. ":6060"). Default empty = disabled.
 	PprofAddr string
+
+	// NoProgress, when true, suppresses the live status indicator even on a
+	// TTY. Useful for operators piping the live stderr stream into less or
+	// other consumers that don't render ANSI cursor controls.
+	NoProgress bool
 }
 
 func Default() Config {
