@@ -113,6 +113,7 @@ func newScanCmd() *cobra.Command {
 	f.StringVar(&cfg.PprofAddr, "pprof", "", "enable net/http/pprof on this addr (e.g. :6060); empty disables")
 	f.BoolVar(&cfg.NoProgress, "no-progress", false, "disable the live status indicator (auto-disabled when stderr isn't a TTY)")
 	f.BoolVar(&cfg.NoStealth, "no-stealth", false, "disable chromedp stealth patches (debugging only)")
+	f.IntVar(&cfg.AncestorRecurseDepth, "ancestor-recurse-depth", cfg.AncestorRecurseDepth, "ascend up to N parent paths from 2xx probe hits and probe them (0 disables; 2 is the recommended upper bound)")
 
 	return cmd
 }

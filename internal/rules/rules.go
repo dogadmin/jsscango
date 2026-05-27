@@ -46,6 +46,12 @@ func (r Rule) IsEnabled() bool { return r.Enabled == nil || *r.Enabled }
 type Set struct {
 	Rules       []*Rule
 	BlackText   []string // literal substrings (preserved for inspection)
+	// Source describes where the rules YAML was loaded from. One of:
+	//   "embedded"          - compiled-in default
+	//   "flag:<path>"       - explicit --rules CLI flag
+	//   "env:<path>"        - $JSSCANGO_RULES_PATH env override
+	//   "user:<path>"       - lazily-materialized user config path
+	Source      string
 	blackTextAC *aho.Matcher
 	compileErrs map[string]error
 }
@@ -54,35 +60,66 @@ type Set struct {
 // failed to compile. They are silently skipped during Apply.
 func (s *Set) CompileErrors() map[string]error { return s.compileErrs }
 
-// Load builds a Set from embedded defaults, optionally replaced by an
-// external YAML file at overridePath (empty = use defaults).
+// Load builds a Set using the following precedence (highest first):
 //
-// External overrides REPLACE the rule set; they do not merge. This is the
-// behaviour confirmed during planning ("--rules is replacement not merge").
+//  1. Explicit overridePath (the --rules CLI flag) - REPLACES the rule set.
+//  2. $JSSCANGO_RULES_PATH env var - REPLACES the rule set.
+//  3. The user-config rules.yaml at os.UserConfigDir()/jsscango/rules.yaml.
+//     On first run this file is auto-created from the embedded defaults so
+//     subsequent edits are picked up without re-running `rules dump`.
+//  4. Embedded defaults compiled into the binary (final fallback).
+//
+// External overrides REPLACE the rule set; they do not merge.
 func Load(overridePath string) (*Set, error) {
-	var rulesYAML, blackYAML []byte
-	var err error
+	// 1. Explicit --rules wins.
 	if overridePath != "" {
-		rulesYAML, err = os.ReadFile(overridePath)
-		if err != nil {
-			return nil, fmt.Errorf("read --rules: %w", err)
-		}
-		// Black text always comes from embedded; users override regex rules
-		// but they don't usually want to tweak BLACK_TEXT and there's no
-		// schema collision risk this way.
-		blackYAML, err = defaultFS.ReadFile("embedded/blacktext.yaml")
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		if rulesYAML, err = defaultFS.ReadFile("embedded/rules.yaml"); err != nil {
-			return nil, err
-		}
-		if blackYAML, err = defaultFS.ReadFile("embedded/blacktext.yaml"); err != nil {
-			return nil, err
+		return loadFromFile(overridePath, "flag:"+overridePath)
+	}
+	// 2. Env override.
+	if env := os.Getenv(EnvRulesPath); env != "" {
+		return loadFromFile(env, "env:"+env)
+	}
+	// 3. User config path (best-effort auto-create on first run).
+	if userPath, _, err := EnsureUserRulesFile(nil); err == nil && userPath != "" {
+		if _, statErr := os.Stat(userPath); statErr == nil {
+			return loadFromFile(userPath, "user:"+userPath)
 		}
 	}
+	// 4. Embedded.
+	return loadFromEmbedded()
+}
 
+// loadFromFile reads rules YAML from disk, combines it with the embedded
+// blacktext.yaml, and returns a compiled Set tagged with the given source.
+// Blacktext is intentionally NOT externalized; see Load doc.
+func loadFromFile(path, source string) (*Set, error) {
+	rulesYAML, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read rules %s: %w", path, err)
+	}
+	blackYAML, err := defaultFS.ReadFile("embedded/blacktext.yaml")
+	if err != nil {
+		return nil, err
+	}
+	return buildSet(rulesYAML, blackYAML, source)
+}
+
+// loadFromEmbedded uses the binary-embedded rules.yaml + blacktext.yaml.
+func loadFromEmbedded() (*Set, error) {
+	rulesYAML, err := defaultFS.ReadFile("embedded/rules.yaml")
+	if err != nil {
+		return nil, err
+	}
+	blackYAML, err := defaultFS.ReadFile("embedded/blacktext.yaml")
+	if err != nil {
+		return nil, err
+	}
+	return buildSet(rulesYAML, blackYAML, "embedded")
+}
+
+// buildSet parses and compiles the two YAML blobs into a ready-to-use Set.
+// The source string is stored verbatim on the returned Set.
+func buildSet(rulesYAML, blackYAML []byte, source string) (*Set, error) {
 	var doc struct {
 		Rules []*Rule `yaml:"rules"`
 	}
@@ -98,6 +135,7 @@ func Load(overridePath string) (*Set, error) {
 
 	set := &Set{
 		BlackText:   bdoc.Markers,
+		Source:      source,
 		blackTextAC: aho.New(bdoc.Markers),
 		compileErrs: make(map[string]error),
 	}

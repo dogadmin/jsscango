@@ -83,22 +83,30 @@ type Config struct {
 	// patches injected via Page.addScriptToEvaluateOnNewDocument. Default
 	// false (stealth ON); flip on for debugging the unpatched fingerprint.
 	NoStealth bool
+
+	// AncestorRecurseDepth controls the ancestor-path recurse stage that
+	// fires after the primary probe stage: for each 2xx hit, ascend up to
+	// N parent paths (with trailing slash) and probe them as potential
+	// index endpoints. 0 disables the stage. 2 is the upper bound the
+	// maintainer recommends — going further is mostly noise.
+	AncestorRecurseDepth int
 }
 
 func Default() Config {
 	return Config{
-		Chrome:         ChromeAuto,
-		Workers:        64,
-		PerHostQPS:     5.0,
-		MaxDepth:       3,
-		MaxBodyMB:      16,
-		Timeout:        DefaultTimeout,
-		TargetTimeout:  DefaultTargetTTL,
-		Formats:        []Format{FormatJSONL, FormatXLSX},
-		OutDir:         "results",
-		LogLevel:       "info",
-		UA:             DefaultUserAgent,
-		TLSFingerprint: "chrome120",
+		Chrome:               ChromeAuto,
+		Workers:              64,
+		PerHostQPS:           5.0,
+		MaxDepth:             3,
+		MaxBodyMB:            16,
+		Timeout:              DefaultTimeout,
+		TargetTimeout:        DefaultTargetTTL,
+		Formats:              []Format{FormatJSONL, FormatXLSX},
+		OutDir:               "results",
+		LogLevel:             "info",
+		UA:                   DefaultUserAgent,
+		TLSFingerprint:       "chrome120",
+		AncestorRecurseDepth: 2,
 	}
 }
 

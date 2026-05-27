@@ -107,6 +107,23 @@ func (f *HTTPFetcher) build(ctx context.Context, r Request) (*http.Request, erro
 		}
 	case "", MethodGET:
 		method = http.MethodGet
+	case Method(http.MethodPut), Method(http.MethodPatch):
+		// Framework-aware extraction can declare PUT/PATCH; send the body
+		// the caller supplied (or empty) under the declared verb.
+		method = string(r.Method)
+		if r.Body != nil {
+			body = bytes.NewReader(r.Body)
+		} else {
+			body = bytes.NewReader(nil)
+		}
+	case Method(http.MethodDelete), Method(http.MethodHead), Method(http.MethodOptions):
+		// Body-less verbs (per usual REST conventions). Body is still
+		// permitted by HTTP but DELETE/HEAD/OPTIONS are most commonly
+		// issued without one; if the caller supplied a body we honor it.
+		method = string(r.Method)
+		if r.Body != nil {
+			body = bytes.NewReader(r.Body)
+		}
 	default:
 		return nil, fmt.Errorf("unknown method %q", r.Method)
 	}
@@ -121,7 +138,11 @@ func (f *HTTPFetcher) build(ctx context.Context, r Request) (*http.Request, erro
 	switch r.Method {
 	case MethodPOSTForm:
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	case MethodPOSTJSON:
+	case MethodPOSTJSON, Method(http.MethodPut), Method(http.MethodPatch):
+		// PUT/PATCH bodies in modern APIs are almost always JSON; setting
+		// the header here keeps the request shape consistent with what
+		// axios.put / axios.patch would have sent. Callers that need a
+		// different content-type can override via r.Headers below.
 		req.Header.Set("Content-Type", "application/json")
 	}
 	for k, v := range r.Headers {

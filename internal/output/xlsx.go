@@ -23,6 +23,7 @@ const (
 	sheetAllJS            = "所有存活的js"
 	sheetAllStatic        = "所有存活的静态url"
 	sheetAPIPaths         = "API接口列表"
+	sheetFrontendRoutes   = "前端路由 (Vue Router)"
 	sheetProbeResponses   = "探测响应"
 	sheetFingerprintHits  = "hae检测结果"
 	sheetSensitiveHits    = "敏感信息检测结果"
@@ -38,15 +39,16 @@ type XLSX struct {
 	target string
 	folder string
 
-	allLoaded     []types.DiscoveredURL
-	js            []types.DiscoveredURL
-	nonJS         []types.DiscoveredURL
-	allJS         []types.DiscoveredURL
-	allStatic     []types.DiscoveredURL
-	apiPaths      []types.APIPath
-	probes        []types.ProbeResult
-	fingerprintHs []types.RuleHit
-	sensitiveHs   []types.RuleHit
+	allLoaded      []types.DiscoveredURL
+	js             []types.DiscoveredURL
+	nonJS          []types.DiscoveredURL
+	allJS          []types.DiscoveredURL
+	allStatic      []types.DiscoveredURL
+	apiPaths       []types.APIPath
+	frontendRoutes []types.DiscoveredURL
+	probes         []types.ProbeResult
+	fingerprintHs  []types.RuleHit
+	sensitiveHs    []types.RuleHit
 }
 
 func NewXLSX(outDir string) *XLSX { return &XLSX{OutDir: outDir} }
@@ -64,6 +66,7 @@ func (x *XLSX) Start(_ context.Context, targetFolder string) error {
 	x.allJS = nil
 	x.allStatic = nil
 	x.apiPaths = nil
+	x.frontendRoutes = nil
 	x.probes = nil
 	x.fingerprintHs = nil
 	x.sensitiveHs = nil
@@ -100,6 +103,14 @@ func (x *XLSX) Write(r types.Report) error {
 	case "api_path":
 		if r.API != nil {
 			x.apiPaths = append(x.apiPaths, *r.API)
+		}
+	case "frontend_route":
+		// Pipeline emits one frontend_route event per Vue Router /
+		// SPA-router path. Captured into its own sheet so the operator
+		// can spot the routes the chromedp recursion should navigate to
+		// without having to grep through the discovered_url stream.
+		if r.URL != nil {
+			x.frontendRoutes = append(x.frontendRoutes, *r.URL)
 		}
 	case "probe":
 		if r.Probe != nil && r.Probe.Kept {
@@ -140,6 +151,7 @@ func (x *XLSX) Close() error {
 	writeDiscoveredSheet(f, sheetAllJS, x.allJS)
 	writeDiscoveredSheet(f, sheetAllStatic, x.allStatic)
 	writeAPISheet(f, sheetAPIPaths, x.apiPaths)
+	writeRouteSheet(f, sheetFrontendRoutes, x.frontendRoutes)
 	writeProbeSheet(f, sheetProbeResponses, x.probes)
 	writeRuleSheet(f, sheetFingerprintHits, x.fingerprintHs)
 	writeRuleSheet(f, sheetSensitiveHits, x.sensitiveHs)
@@ -194,11 +206,34 @@ func writeAPISheet(f *excelize.File, name string, rows []types.APIPath) {
 	}
 }
 
+// writeRouteSheet writes the Vue Router / SPA-router routes sheet. Columns
+// mirror the discovered_url sheet's first four (Target / Path / Source /
+// Referer) — the operator needs to see where each route came from so they
+// can correlate it back to the source JS file.
+func writeRouteSheet(f *excelize.File, name string, rows []types.DiscoveredURL) {
+	if _, err := f.NewSheet(name); err != nil {
+		return
+	}
+	header := []interface{}{"Target", "Path", "Source", "Referer"}
+	_ = f.SetSheetRow(name, "A1", &header)
+	for i, r := range rows {
+		row := []interface{}{
+			sanitizeXLSXCell(r.Target),
+			sanitizeXLSXCell(r.URL),
+			r.Source,
+			sanitizeXLSXCell(r.Referer),
+		}
+		_ = f.SetSheetRow(name, fmt.Sprintf("A%d", i+2), &row)
+	}
+}
+
 func writeProbeSheet(f *excelize.File, name string, rows []types.ProbeResult) {
 	if _, err := f.NewSheet(name); err != nil {
 		return
 	}
-	header := []interface{}{"URL", "Method", "Status", "Content-Type", "Size", "Body Path", "SHA256", "Duplicate"}
+	// Source is appended at the end so existing consumers (chuli.py et al.)
+	// keep their column indices stable; new tooling can read column I.
+	header := []interface{}{"URL", "Method", "Status", "Content-Type", "Size", "Body Path", "SHA256", "Duplicate", "Source"}
 	_ = f.SetSheetRow(name, "A1", &header)
 	for i, r := range rows {
 		row := []interface{}{
@@ -210,6 +245,7 @@ func writeProbeSheet(f *excelize.File, name string, rows []types.ProbeResult) {
 			r.BodyPath,
 			r.BodySHA256,
 			r.Duplicate,
+			r.Source,
 		}
 		_ = f.SetSheetRow(name, fmt.Sprintf("A%d", i+2), &row)
 	}

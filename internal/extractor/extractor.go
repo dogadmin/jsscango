@@ -9,9 +9,14 @@ import (
 
 // Found is one classified candidate emitted by the extractor.
 type Found struct {
-	Kind    string // "js" | "static" | "api" | "webpack"
+	Kind    string // "js" | "static" | "api" | "frontend_route" | "webpack"
 	Value   string // cleaned URL or path candidate
 	Pattern string // pattern ID, debug aid
+	// Method is the HTTP verb attached to this Found when the source body
+	// declared one via an axios-style url+method config (see methodpair.go).
+	// Empty for Found values that did not come from such a pair, in which
+	// case the probe stage falls back to its three-method fan-out.
+	Method string `json:",omitempty"`
 }
 
 // FromJSBody scans body and emits JS URLs, static URLs, webpack chunks,
@@ -30,6 +35,34 @@ func FromJSBody(body []byte) []Found {
 		return nil
 	}
 	out := make([]Found, 0, 64)
+
+	// Framework hints: detect any axios baseURL declaration and any
+	// url+method config pairs FIRST. The baseURL gates how relative API
+	// paths are resolved (we prepend it so `/auth/login` under a
+	// `baseURL:"/api"` instance becomes `/api/auth/login`); method pairs
+	// let the probe stage skip the three-method fan-out for endpoints that
+	// declared their verb in the source.
+	baseURLs := DetectBaseURLs(body)
+	var baseURL string
+	if len(baseURLs) > 0 {
+		baseURL = baseURLs[0]
+	}
+	methodMap := make(map[string]string)
+	for _, p := range DetectMethodPairs(body) {
+		methodMap[p.Path] = p.Method
+	}
+	// Vue Router / SPA route declarations look identical to API paths to
+	// the generic api scan (api_4: `path:"…"`). We detect them up-front so
+	// the post-processing loop can reclassify any matching api Found into
+	// kind=frontend_route BEFORE the baseURL prefix would otherwise paint
+	// "/api/" over a frontend route. Without this, a target whose JS
+	// declares both `baseURL:"/api"` and `{path:"/leaveForm", component:…}`
+	// would have us probe https://target/api/leaveForm — a wrong-namespace
+	// 404 that pollutes the probe output. Routes that the api scan didn't
+	// pick up (relative `children:` paths, edge-case shapes) are appended
+	// as separate Found entries after the loop.
+	routes := DetectRoutes(body)
+	routeSet := RoutePathSet(routes)
 
 	// Webpack chunks need a body-spanning regex (`(?s).*`) and don't fit
 	// the union form. Scanned separately on the whole body when small;
@@ -57,7 +90,108 @@ func FromJSBody(body []byte) []Found {
 	// the crawler still recurses into the JS file.
 	out = backfillJSKind(out)
 
+	// Framework post-processing in three phases:
+	//
+	//  1. Reclassify any api Found whose Value matches a Vue Router route
+	//     into kind=frontend_route. This MUST run before the baseURL prefix
+	//     and method attachment — a frontend route is not an API endpoint,
+	//     so it shouldn't carry an HTTP verb hint and shouldn't get
+	//     `/api/` painted over it. We also normalise the leading slash on
+	//     the route value so downstream lookups (xlsx sheet, pipeline
+	//     dispatch) see a single canonical form.
+	//  2. Apply the detected baseURL and attach declared methods to the
+	//     remaining api Founds. Order matters here too — the method map is
+	//     keyed by the ORIGINAL (pre-baseURL-prefix) path, since that's how
+	//     it appears in the source, so we look up the method first, THEN
+	//     rewrite the Value with the baseURL prefix.
+	//  3. Append a frontend_route Found for every detected route that the
+	//     api scan didn't pick up. The api scan only emits paths that match
+	//     api_4's `path:"…"` shape; relative `children:` entries like
+	//     `path:"sub"` typically don't get an api hit and would otherwise
+	//     be lost.
+	existingRouteValues := make(map[string]bool, len(routes))
+	for i := range out {
+		if out[i].Kind != "api" {
+			continue
+		}
+		origVal := out[i].Value
+		normalised := origVal
+		if !strings.HasPrefix(normalised, "/") {
+			normalised = "/" + normalised
+		}
+		if _, isRoute := routeSet[normalised]; isRoute {
+			out[i].Kind = "frontend_route"
+			out[i].Value = normalised
+			// Do NOT apply baseURL; do NOT attach method. Frontend routes
+			// are not probed — they get handed off to chromedp navigation
+			// in a later stage.
+			existingRouteValues[normalised] = true
+			continue
+		}
+		if method, ok := methodMap[origVal]; ok {
+			out[i].Method = method
+		}
+		if baseURL != "" {
+			out[i].Value = applyBaseURL(baseURL, origVal)
+		}
+	}
+	for _, r := range routes {
+		normalised := r.Path
+		if !strings.HasPrefix(normalised, "/") {
+			normalised = "/" + normalised
+		}
+		if existingRouteValues[normalised] {
+			continue
+		}
+		existingRouteValues[normalised] = true
+		out = append(out, Found{
+			Kind:    "frontend_route",
+			Value:   normalised,
+			Pattern: "vue_router_route",
+		})
+	}
+
 	return dedupFound(out)
+}
+
+// applyBaseURL prefixes an api path with the detected baseURL, unless the
+// path is absolute (http:// / https://) or already starts with the baseURL.
+// Behavior:
+//   - "http(s)://..." -> unchanged (full URLs aren't mount-relative)
+//   - value already starts with baseURL -> unchanged (idempotent)
+//   - relative ("foo/bar") -> baseURL + "/" + value (with slash joining)
+//   - absolute path ("/foo/bar") -> baseURL + value
+//
+// The detected baseURL is taken verbatim from the source; we don't try to
+// validate it against the target's scheme/host because the extractor is
+// host-agnostic. Downstream (pipeline.buildProbeURLs) joins it onto the
+// target's scheme://host as it does for any other path-only value.
+func applyBaseURL(baseURL, value string) string {
+	if value == "" {
+		return value
+	}
+	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
+		return value
+	}
+	// Idempotency: if the value is already mounted under the baseURL, do
+	// nothing. The prefix check uses trailing-slash-aware compare so
+	// "/api" matches "/api/foo" but not "/apiv2".
+	trimmedBase := strings.TrimRight(baseURL, "/")
+	if trimmedBase != "" && (value == trimmedBase ||
+		strings.HasPrefix(value, trimmedBase+"/") ||
+		strings.HasPrefix(value, trimmedBase+"?")) {
+		return value
+	}
+	if strings.HasPrefix(value, "/") {
+		return trimmedBase + value
+	}
+	// Relative path — join with a slash. If baseURL is empty after the
+	// trim (e.g. baseURL was literally "/"), fall through to the absolute
+	// shape so we don't emit "foo/bar" with no leading slash.
+	if trimmedBase == "" {
+		return "/" + value
+	}
+	return trimmedBase + "/" + value
 }
 
 // backfillJSKind appends a synthetic Found{Kind:"js", ...} for any api or

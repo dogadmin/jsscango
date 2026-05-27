@@ -268,3 +268,138 @@ func TestExtraPatterns_GraphQLClientQuery(t *testing.T) {
 		t.Errorf("graphql_client_query pattern not matched in %+v", got)
 	}
 }
+
+// Framework-aware extraction: baseURL + method pair tests.
+
+func TestFromJSBody_AxiosBaseURLResolves(t *testing.T) {
+	body := []byte(`
+		const api = axios.create({ baseURL: "/api", timeout: 5000 });
+		api.get({ url: "/auth/login" });
+	`)
+	got := FromJSBody(body)
+	if !containsValue(got, "api", "/api/auth/login") {
+		t.Errorf("axios baseURL prefix not applied; want /api/auth/login in %+v", got)
+	}
+	// And the unprefixed value should NOT appear: it would represent the
+	// old "miss the prefix" behavior.
+	if containsValue(got, "api", "/auth/login") {
+		t.Errorf("unprefixed /auth/login still emitted (baseURL not applied); got %+v", got)
+	}
+}
+
+func TestFromJSBody_AxiosBaseURLIdempotent(t *testing.T) {
+	// If the source already declared the path under the baseURL, we must
+	// not double-prefix it ("/api/api/foo" is wrong).
+	body := []byte(`
+		const api = axios.create({ baseURL: "/api" });
+		api.get({ url: "/api/already/prefixed" });
+	`)
+	got := FromJSBody(body)
+	if !containsValue(got, "api", "/api/already/prefixed") {
+		t.Errorf("idempotent baseURL: want /api/already/prefixed in %+v", got)
+	}
+	if containsValue(got, "api", "/api/api/already/prefixed") {
+		t.Errorf("idempotent baseURL: double-prefixed value leaked in %+v", got)
+	}
+}
+
+func TestFromJSBody_MethodAttached(t *testing.T) {
+	body := []byte(`
+		const cfg = { url: "/foo", method: "delete" };
+		api(cfg);
+	`)
+	got := FromJSBody(body)
+	found := false
+	for _, f := range got {
+		if f.Kind == "api" && f.Value == "/foo" && f.Method == "DELETE" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("method DELETE not attached to /foo Found; got %+v", got)
+	}
+}
+
+func TestFromJSBody_BaseURLAndMethodTogether(t *testing.T) {
+	// End-to-end: the scenario described in the bug report. baseURL is
+	// declared on an axios instance and an inline config carries url +
+	// method. The resolved Found should have both the prefix AND the verb.
+	body := []byte(`
+		const api = axios.create({ baseURL: "/api" });
+		api({ url: "/users/42", method: "patch" });
+	`)
+	got := FromJSBody(body)
+	ok := false
+	for _, f := range got {
+		if f.Kind == "api" && f.Value == "/api/users/42" && f.Method == "PATCH" {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		t.Errorf("expected Found{kind=api, value=/api/users/42, method=PATCH} in %+v", got)
+	}
+}
+
+// TestFromJSBody_VueRouterRoutesNotApi covers the critical interaction
+// between baseURL detection and Vue Router route reclassification. The
+// route /leaveForm must NOT pick up the /api prefix that an axios.create
+// baseURL would otherwise apply, while a real API call (/auth/login)
+// must still get prefixed. Without the reclassification, the smoke run
+// reported probing https://target/api/leaveForm — a wrong-namespace 404.
+func TestFromJSBody_VueRouterRoutesNotApi(t *testing.T) {
+	body := []byte(`
+		var axios_inst = axios.create({baseURL:"/api"});
+		var routes = [{path:"/leaveForm",name:"L",component:c}];
+		axios_inst.get("/auth/login");
+	`)
+	got := FromJSBody(body)
+
+	var foundRoute, foundAPI, leakedRouteAsAPI bool
+	for _, f := range got {
+		if f.Kind == "frontend_route" && f.Value == "/leaveForm" {
+			foundRoute = true
+		}
+		if f.Kind == "api" && f.Value == "/api/auth/login" {
+			foundAPI = true
+		}
+		// Either of these means the reclassification failed:
+		//   - /leaveForm kept as api (no reclass)
+		//   - /api/leaveForm leaked (reclass happened after baseURL paint)
+		if f.Kind == "api" && (f.Value == "/leaveForm" || f.Value == "/api/leaveForm") {
+			leakedRouteAsAPI = true
+		}
+	}
+	if !foundRoute {
+		t.Errorf("expected Found{kind=frontend_route, value=/leaveForm} in %+v", got)
+	}
+	if !foundAPI {
+		t.Errorf("expected Found{kind=api, value=/api/auth/login} in %+v", got)
+	}
+	if leakedRouteAsAPI {
+		t.Errorf("/leaveForm leaked as api (frontend_route reclass failed) in %+v", got)
+	}
+}
+
+// TestFromJSBody_VueRouterChildrenRelativePath verifies that routes
+// declared inside a children:[…] array — typically with a relative path
+// like "sub" — get appended as their own frontend_route Found entries
+// even when the api scan didn't pick them up.
+func TestFromJSBody_VueRouterChildrenRelativePath(t *testing.T) {
+	body := []byte(`var r = {path:"/parent",name:"P",component:c,children:[{path:"sub",name:"S",component:c}]};`)
+	got := FromJSBody(body)
+	wantValues := []string{"/parent", "/sub"}
+	for _, want := range wantValues {
+		found := false
+		for _, f := range got {
+			if f.Kind == "frontend_route" && f.Value == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected Found{kind=frontend_route, value=%q} in %+v", want, got)
+		}
+	}
+}

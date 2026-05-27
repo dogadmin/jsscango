@@ -39,12 +39,32 @@ type Prober struct {
 	Parameters []string       // mined params for POST/GET-with-param probes
 }
 
+// Target is one URL to probe with optional method hints. When Methods is
+// non-empty, the Prober sends exactly those methods (mapped to fetcher.Method)
+// instead of its default GET / POST_FORM / POST_JSON fan-out. The methods
+// come from framework-aware extraction (axios url+method pairs, OpenAPI
+// declarations, etc.) — surfacing them lets the prober skip wasted requests
+// AND probe non-default verbs like DELETE / PATCH that the fan-out misses.
+//
+// Source/ParentURL annotate where the target came from. Source is propagated
+// into ProbeResult so output sinks can group probes by origin
+// ("ancestor_recurse" vs primary extraction). ParentURL is set on
+// ancestor-recurse targets and identifies the 2xx hit that produced the
+// ancestor — useful for trace/debug.
+type Target struct {
+	URL       string
+	Methods   []string // upper-case HTTP verbs; empty -> fan-out fallback
+	Source    string   // optional; "extractor" | "ancestor_recurse" | ...
+	ParentURL string   // optional; when Source=="ancestor_recurse", the URL that produced this ancestor
+}
+
 // Job is one (url, method, body) tuple to probe.
 type Job struct {
 	URL     string
 	Method  fetcher.Method
 	Body    []byte
 	Referer string
+	Source  string // propagated into ProbeResult.Source
 }
 
 // methodFolderPrefix mirrors the file-naming used by the Python tool at
@@ -64,7 +84,24 @@ func methodFolderPrefix(m fetcher.Method) string {
 // Run probes every (url × {GET, POST_FORM, POST_JSON}) combination. Each is
 // scheduled as an individual Job so a slow URL on one method doesn't block
 // the others. Dangerous paths are noted but not probed.
+//
+// This is the legacy entry point preserved for callers that don't yet have
+// method hints. RunTargets is the method-aware path used by the pipeline.
 func (p *Prober) Run(ctx context.Context, apiURLs []string) error {
+	targets := make([]Target, 0, len(apiURLs))
+	for _, u := range apiURLs {
+		targets = append(targets, Target{URL: u})
+	}
+	return p.RunTargets(ctx, targets)
+}
+
+// RunTargets probes each Target, honoring its Methods hint when present.
+// Targets without a Methods hint fall back to the legacy three-method
+// fan-out (GET, POST_FORM, POST_JSON). When a Methods hint specifies a
+// verb the prober doesn't have a body builder for (PUT/DELETE/PATCH/HEAD/
+// OPTIONS), the request is sent with no body; the fetcher accepts any
+// HTTP method string so this Just Works against the live target.
+func (p *Prober) RunTargets(ctx context.Context, targets []Target) error {
 	if p.Workers <= 0 {
 		p.Workers = 32
 	}
@@ -75,33 +112,84 @@ func (p *Prober) Run(ctx context.Context, apiURLs []string) error {
 	sem := semaphore.NewWeighted(int64(p.Workers))
 	g, gctx := errgroup.WithContext(ctx)
 
-	for _, u := range apiURLs {
-		u := u
-		if IsDangerous(u) {
+	for _, t := range targets {
+		t := t
+		if IsDangerous(t.URL) {
 			// Surface skip via emit so users see the decision in JSONL/xlsx.
 			if p.Emit != nil {
 				p.Emit(types.ProbeResult{
 					Target:  p.TargetURL,
-					URL:     u,
+					URL:     t.URL,
 					Method:  "SKIPPED_DANGEROUS",
 					Referer: p.TargetURL,
+					Source:  t.Source,
 				})
 			}
 			continue
 		}
-		for _, m := range []fetcher.Method{fetcher.MethodGET, fetcher.MethodPOSTForm, fetcher.MethodPOSTJSON} {
+		methods := methodsFor(t)
+		for _, m := range methods {
 			m := m
 			if err := sem.Acquire(gctx, 1); err != nil {
 				return err
 			}
+			src := t.Source
 			g.Go(func() error {
 				defer sem.Release(1)
-				p.runOne(gctx, Job{URL: u, Method: m, Body: bodyFor(m, p.Parameters), Referer: p.TargetURL})
+				p.runOne(gctx, Job{URL: t.URL, Method: m, Body: bodyFor(m, p.Parameters), Referer: p.TargetURL, Source: src})
 				return nil
 			})
 		}
 	}
 	return g.Wait()
+}
+
+// methodsFor decides which methods to fire for a Target. When the Target
+// declared a method hint we honor it (mapped to fetcher.Method where it
+// matches our enum, otherwise passed through as a raw method string for
+// the fetcher to issue). Otherwise we fall back to the three-method
+// fan-out preserved from the original probe semantics.
+func methodsFor(t Target) []fetcher.Method {
+	if len(t.Methods) == 0 {
+		return []fetcher.Method{fetcher.MethodGET, fetcher.MethodPOSTForm, fetcher.MethodPOSTJSON}
+	}
+	out := make([]fetcher.Method, 0, len(t.Methods))
+	seen := make(map[fetcher.Method]struct{}, len(t.Methods))
+	for _, raw := range t.Methods {
+		m := mapDeclaredMethod(raw)
+		if m == "" {
+			continue
+		}
+		if _, ok := seen[m]; ok {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		// Hint was non-empty but contained only unrecognized verbs — fall
+		// back to the default fan-out rather than firing nothing.
+		return []fetcher.Method{fetcher.MethodGET, fetcher.MethodPOSTForm, fetcher.MethodPOSTJSON}
+	}
+	return out
+}
+
+// mapDeclaredMethod converts an upper-case HTTP verb (as parsed from JS
+// source or an OpenAPI doc) into the fetcher.Method we issue. GET / POST
+// map to MethodGET / MethodPOSTJSON respectively (POST defaults to JSON
+// since axios callers more often expect JSON than form bodies). The other
+// standard verbs are passed through as raw method strings; fetcher.Method
+// is a string type so this is a value cast, no plumbing change needed.
+func mapDeclaredMethod(verb string) fetcher.Method {
+	switch verb {
+	case "GET":
+		return fetcher.MethodGET
+	case "POST":
+		return fetcher.MethodPOSTJSON
+	case "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS":
+		return fetcher.Method(verb)
+	}
+	return ""
 }
 
 func (p *Prober) runOne(ctx context.Context, j Job) {
@@ -124,6 +212,7 @@ func (p *Prober) runOne(ctx context.Context, j Job) {
 		ContentType: resp.ContentType,
 		Size:        int64(len(resp.Body)),
 		Referer:     j.Referer,
+		Source:      j.Source,
 	}
 	if len(j.Body) > 0 {
 		pr.Parameter = "<params>"

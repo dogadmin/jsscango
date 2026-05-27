@@ -173,9 +173,22 @@ func (c *Crawler) process(ctx context.Context, j job, enqueue func(job)) {
 		case "api":
 			// API path discovery is also emitted here so consumers see the
 			// path attached to its source JS file. The pipeline post-processes
-			// these into API URLs separately.
+			// these into API URLs separately. Method is propagated when the
+			// source declared it via an axios-style url+method pair so the
+			// probe stage can skip its three-method fan-out for that URL.
 			c.emit(types.DiscoveredURL{
 				URL: f.Value, Referer: j.url, Kind: types.KindAPIPath, Depth: j.depth + 1, Source: "crawl",
+				Method: f.Method,
+			})
+		case "frontend_route":
+			// Vue Router / SPA-router navigation paths. Emitted with
+			// Kind=KindFrontendRoute so the pipeline's apiEmitter routes
+			// them onto their own event AND keeps them out of the probe
+			// queue (apiPathSet.Add is gated on KindAPIPath). A downstream
+			// chromedp-driven recursion will navigate to each SPA page and
+			// capture the XHR calls fired during that navigation.
+			c.emit(types.DiscoveredURL{
+				URL: f.Value, Referer: j.url, Kind: types.KindFrontendRoute, Depth: j.depth + 1, Source: "crawl",
 			})
 		}
 	}

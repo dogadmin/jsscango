@@ -52,17 +52,20 @@
   {
     "Kind": "api",
     "Value": "/services/order/cancel",
-    "Pattern": "api_5"
+    "Pattern": "api_5",
+    "Method": "POST"
   },
   {
     "Kind": "api",
     "Value": "/services/order/refund",
-    "Pattern": "api_5"
+    "Pattern": "api_5",
+    "Method": "POST"
   },
   {
     "Kind": "api",
     "Value": "/services/order/search",
-    "Pattern": "api_5"
+    "Pattern": "api_5",
+    "Method": "GET"
   },
   {
     "Kind": "static",

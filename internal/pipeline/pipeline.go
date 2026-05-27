@@ -64,6 +64,7 @@ func New(cfg config.Config, logger *slog.Logger) (*Pipeline, error) {
 	}
 	counts := rs.Count()
 	logger.Info("rules loaded",
+		"source", rs.Source,
 		"fingerprint", counts[rules.KindFingerprint],
 		"vuln", counts[rules.KindVuln],
 		"sensitive", counts[rules.KindSensitive],
@@ -280,13 +281,34 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 
 	// --- Stage 2 + 3: crawl + inline API path extraction ------------------
 	apiPathSet := newConcurrentSet()
+	// apiMethodHints captures the HTTP verb that framework-aware extraction
+	// attached to each discovered API path (axios-style url+method pairs).
+	// The probe stage prefers these over the default GET/POST_FORM/POST_JSON
+	// fan-out, saving probe traffic AND covering DELETE/PATCH-only endpoints
+	// the fan-out would have missed entirely.
+	apiMethodHints := newConcurrentMap()
 	apiEmitter := func(d types.DiscoveredURL) {
 		emitDU(d)
 		if d.Kind == types.KindAPIPath {
 			apiPathSet.Add(d.URL)
+			if d.Method != "" {
+				apiMethodHints.Set(d.URL, d.Method)
+			}
 			emit("api_path", types.Report{API: &types.APIPath{
 				Target: target.URL, Referer: d.Referer, Path: d.URL, Pattern: d.Source,
+				Method: d.Method,
 			}})
+		}
+		// Vue Router / SPA-router routes get their own event so they show up
+		// in the dedicated XLSX sheet. They are intentionally NOT added to
+		// apiPathSet — the probe stage's GET + POST_FORM + POST_JSON fan-out
+		// would generate 3x noise per route against a 404 page (frontend
+		// routes resolve only via SPA navigation, not via a server-side GET
+		// on the path).
+		if d.Kind == types.KindFrontendRoute {
+			route := d
+			route.Target = target.URL
+			emit("frontend_route", types.Report{URL: &route})
 		}
 	}
 	if doStage(state.StageCrawl) {
@@ -321,16 +343,29 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 	probeCount, hitCount := 0, 0
 
 	// --- Stage 4: probe ---------------------------------------------------
+	// hits2xx and probedURLs are populated by the probe Emit callback below
+	// and consumed by the ancestor-recurse sub-stage that follows.
+	var (
+		hits2xxMu   sync.Mutex
+		hits2xx     []string
+		probedURLs  = make(map[string]struct{})
+	)
 	if !p.cfg.NoProbe && !p.cfg.CollectOnly && doStage(state.StageProbe) {
-		// Construct probe URLs: combine each discovered base URL with each
-		// API path. Faithful to filter_data() in getJsUrl.py:119 minus the
-		// path-with-api-string heuristics, which Phase 2 keeps simple - the
-		// crawler emits full URLs when JS contains absolute API paths, and
-		// the relative ones get prefixed onto the target's scheme+host.
-		urls := buildProbeURLs(target, seeds, apiPathSet.Items(), wellKnownAPIs)
+		// Construct probe targets: combine each discovered base URL with each
+		// API path AND attach the declared HTTP method when extraction
+		// surfaced one. Faithful to filter_data() in getJsUrl.py:119 minus
+		// the path-with-api-string heuristics, which Phase 2 keeps simple -
+		// the crawler emits full URLs when JS contains absolute API paths,
+		// and the relative ones get prefixed onto the target's scheme+host.
+		targets := buildProbeTargets(target, seeds, apiPathSet.Items(), apiMethodHints.Snapshot(), wellKnownAPIs)
+		// Seed the already-probed set with the primary targets so the
+		// ancestor-recurse stage skips URLs we already covered.
+		for _, t := range targets {
+			probedURLs[t.URL] = struct{}{}
+		}
 		setStage(state.StageProbe)
 		p.log.Info("stage", "name", state.StageProbe, "phase", "start",
-			"urls", len(urls), "workers", p.cfg.WorkersProbe, "per_host_qps", p.cfg.PerHostQPS)
+			"urls", len(targets), "workers", p.cfg.WorkersProbe, "per_host_qps", p.cfg.PerHostQPS)
 		emit("stage", types.Report{Stage: state.StageProbe})
 		stageStart := time.Now()
 		var probeStats probe.Stats
@@ -356,10 +391,18 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 				}
 				setCount("probes", int(total))
 				setCount("probes_kept", int(kept))
+				// Record 2xx hits from the PRIMARY stage only (Source=="")
+				// so the ancestor-recurse stage doesn't re-recurse on its
+				// own results — depth is capped at 2 from the original hit.
+				if r.Source == "" && r.StatusCode >= 200 && r.StatusCode < 300 {
+					hits2xxMu.Lock()
+					hits2xx = append(hits2xx, r.URL)
+					hits2xxMu.Unlock()
+				}
 				emit("probe", types.Report{Probe: &r})
 			},
 		}
-		if err := pr.Run(ctx, urls); err != nil {
+		if err := pr.RunTargets(ctx, targets); err != nil {
 			p.log.Warn("probe", "err", err)
 		}
 		probeCount = probeStats.Total
@@ -368,6 +411,76 @@ func (p *Pipeline) RunTarget(ctx context.Context, raw string) error {
 			"total", probeStats.Total, "kept", probeStats.Kept,
 			"dup", probeStats.Dup, "skipped", probeStats.Skipped, "failed", probeStats.Failed)
 		_ = resume.Done(state.StageProbe)
+
+		// --- Stage 4b: ancestor recurse ---------------------------------
+		// For each 2xx hit, ascend up to AncestorRecurseDepth parent paths
+		// and probe them as potential index endpoints. Crucially this stage
+		// does NOT recurse on its own results — hard stop at depth 2 from
+		// the ORIGINAL hit, because DeriveAncestors already returns parents
+		// up to depth in one shot.
+		if p.cfg.AncestorRecurseDepth > 0 && doStage(state.StageAncestorRecurse) {
+			var ancestors []probe.Target
+			seenAncestor := make(map[string]struct{})
+			for _, hit := range hits2xx {
+				parents, err := probe.DeriveAncestors(hit, p.cfg.AncestorRecurseDepth)
+				if err != nil {
+					p.log.Debug("derive ancestors", "url", hit, "err", err)
+					continue
+				}
+				for _, pURL := range parents {
+					if _, ok := seenAncestor[pURL]; ok {
+						continue
+					}
+					if _, ok := probedURLs[pURL]; ok {
+						continue
+					}
+					seenAncestor[pURL] = struct{}{}
+					ancestors = append(ancestors, probe.Target{
+						URL:       pURL,
+						Methods:   []string{"GET"}, // index lookups only
+						Source:    "ancestor_recurse",
+						ParentURL: hit,
+					})
+				}
+			}
+			if len(ancestors) > 0 {
+				setStage(state.StageAncestorRecurse)
+				p.log.Info("stage", "name", state.StageAncestorRecurse, "phase", "start",
+					"ancestors", len(ancestors), "from_2xx", len(hits2xx))
+				emit("stage", types.Report{Stage: state.StageAncestorRecurse})
+				ancStart := time.Now()
+				var ancKept atomic.Int64
+				ancPr := &probe.Prober{
+					F:         p.fetch,
+					Rules:     p.rules,
+					Seen:      seen,
+					Workers:   p.cfg.WorkersProbe,
+					OutDir:    outDir,
+					TargetURL: target.URL,
+					Logger:    p.log,
+					Emit: func(r types.ProbeResult) {
+						probeStats.Observe(r)
+						total := liveTotal.Add(1)
+						kept := liveKept.Load()
+						if r.Kept {
+							kept = liveKept.Add(1)
+							ancKept.Add(1)
+						}
+						setCount("probes", int(total))
+						setCount("probes_kept", int(kept))
+						emit("probe", types.Report{Probe: &r})
+					},
+				}
+				if err := ancPr.RunTargets(ctx, ancestors); err != nil {
+					p.log.Warn("ancestor recurse", "err", err)
+				}
+				probeCount = probeStats.Total
+				p.log.Info("stage", "name", state.StageAncestorRecurse, "phase", "done",
+					"elapsed", time.Since(ancStart),
+					"ancestors", len(ancestors), "kept", int(ancKept.Load()))
+				_ = resume.Done(state.StageAncestorRecurse)
+			}
+		}
 	}
 
 	// --- Stage 5: postprocess (rule hits on saved bodies) -----------------
@@ -450,61 +563,106 @@ func buildSinks(cfg config.Config) *output.Multi {
 	return &output.Multi{Sinks: sinks}
 }
 
-// buildProbeURLs combines target base URL with each API path candidate to
-// produce concrete URLs for the probe stage. Absolute paths starting with /
-// are joined onto the target's scheme://host; full URLs are passed through.
-// wellKnownAPIs are OpenAPI/Swagger/actuator-derived (path, method) pairs;
-// the methods are not yet consulted by the probe stage but are accepted
-// here so the wiring is in place for the eventual method-aware probe.
-func buildProbeURLs(target types.Target, seeds []types.DiscoveredURL, apiPaths []string, wellKnownAPIs []crawler.APIEndpoint) []string {
+// buildProbeTargets combines the target base URL with each API path
+// candidate to produce concrete probe.Target entries. Absolute paths
+// starting with / are joined onto the target's scheme://host; full URLs
+// are passed through. apiMethodHints carries the verb that framework-aware
+// extraction attached to a discovered path (axios-style url+method pair);
+// when present, the probe stage uses ONLY that method, skipping the
+// three-method fan-out. wellKnownAPIs are OpenAPI/Swagger/actuator-derived
+// (path, methods) pairs; their methods are now honored.
+func buildProbeTargets(
+	target types.Target,
+	seeds []types.DiscoveredURL,
+	apiPaths []string,
+	apiMethodHints map[string]string,
+	wellKnownAPIs []crawler.APIEndpoint,
+) []probe.Target {
 	base := target.Scheme + "://" + target.Host
 	if target.Port != "" {
 		base = target.Scheme + "://" + target.Host + ":" + target.Port
 	}
-	seen := make(map[string]struct{}, len(apiPaths))
-	var out []string
-	add := func(u string) {
+	type slot struct {
+		idx     int      // index into out
+		methods []string // upper-cased verbs accumulated so far
+	}
+	seen := make(map[string]*slot, len(apiPaths))
+	var out []probe.Target
+	add := func(u string, methods []string) {
 		if u == "" {
 			return
 		}
-		if _, ok := seen[u]; ok {
+		if s, ok := seen[u]; ok {
+			// Merge any new methods into the existing slot. Empty methods
+			// (the fan-out fallback) trump any prior hint — once we have
+			// seen the URL without a method hint we want the fan-out so
+			// rules cover GET / POST as well as the declared verb.
+			if len(methods) == 0 {
+				out[s.idx].Methods = nil
+				s.methods = nil
+				return
+			}
+			if out[s.idx].Methods == nil {
+				return
+			}
+			for _, m := range methods {
+				exists := false
+				for _, em := range s.methods {
+					if em == m {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					s.methods = append(s.methods, m)
+				}
+			}
+			out[s.idx].Methods = s.methods
 			return
 		}
-		seen[u] = struct{}{}
-		out = append(out, u)
+		out = append(out, probe.Target{URL: u, Methods: append([]string(nil), methods...)})
+		seen[u] = &slot{idx: len(out) - 1, methods: append([]string(nil), methods...)}
 	}
-	// 1. Each discovered API path joined onto the target's base.
+	// 1. Each discovered API path joined onto the target's base. Method
+	// hints are keyed by the raw apiPath (the same value the extractor
+	// emitted and we stored in apiMethodHints).
 	for _, p := range apiPaths {
+		var methods []string
+		if hint, ok := apiMethodHints[p]; ok && hint != "" {
+			methods = []string{hint}
+		}
 		switch {
 		case strings.HasPrefix(p, "http://"), strings.HasPrefix(p, "https://"):
-			add(p)
+			add(p, methods)
 		case strings.HasPrefix(p, "/"):
-			add(base + p)
+			add(base+p, methods)
 		default:
-			add(base + "/" + p)
+			add(base+"/"+p, methods)
 		}
 	}
 	// 2. Also probe the seed "no_js" URLs from homepage discovery (e.g.
 	// chromedp captured /api/X requests directly).
 	for _, s := range seeds {
 		if s.Kind == types.KindNoJS {
-			add(s.URL)
+			add(s.URL, nil)
 		}
 	}
-	// 3. Well-known endpoints (OpenAPI/Swagger/actuator). Methods are
-	// retained on the APIEndpoint struct but not yet consulted — the probe
-	// stage still sends the GET/POST_FORM/POST_JSON triple.
+	// 3. Well-known endpoints (OpenAPI/Swagger/actuator). Their declared
+	// methods are now honored: when the doc said `DELETE /foo`, we probe
+	// only DELETE instead of the three-method fan-out.
 	for _, e := range wellKnownAPIs {
 		p := e.Path
-		switch {
-		case p == "":
+		if p == "" {
 			continue
+		}
+		methods := append([]string(nil), e.Methods...)
+		switch {
 		case strings.HasPrefix(p, "http://"), strings.HasPrefix(p, "https://"):
-			add(p)
+			add(p, methods)
 		case strings.HasPrefix(p, "/"):
-			add(base + p)
+			add(base+p, methods)
 		default:
-			add(base + "/" + p)
+			add(base+"/"+p, methods)
 		}
 	}
 	return out
@@ -531,7 +689,7 @@ func buildTarget(raw string, cfg config.Config) (types.Target, error) {
 // stageList returns the names of stages already marked done in r, sorted
 // for log readability.
 func stageList(r *state.Resume) []string {
-	all := []string{state.StageWellKnown, state.StageHomepage, state.StageCrawl, state.StageProbe, state.StagePostprocess}
+	all := []string{state.StageWellKnown, state.StageHomepage, state.StageCrawl, state.StageProbe, state.StageAncestorRecurse, state.StagePostprocess}
 	var out []string
 	for _, s := range all {
 		if r.IsDone(s) {
@@ -562,6 +720,34 @@ func (s *concurrentSet) Items() []string {
 	out := make([]string, 0, len(s.m))
 	for k := range s.m {
 		out = append(out, k)
+	}
+	return out
+}
+
+// concurrentMap is a tiny string->string map with a mutex. Used by the
+// crawler's apiEmitter callback (which fires from many goroutines) to
+// accumulate the (api_path -> declared HTTP method) hints surfaced by
+// framework-aware extraction. Snapshot returns a plain map[string]string
+// snapshot for the probe stage to consume.
+type concurrentMap struct {
+	mu sync.Mutex
+	m  map[string]string
+}
+
+func newConcurrentMap() *concurrentMap { return &concurrentMap{m: make(map[string]string)} }
+
+func (s *concurrentMap) Set(k, v string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[k] = v
+}
+
+func (s *concurrentMap) Snapshot() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]string, len(s.m))
+	for k, v := range s.m {
+		out[k] = v
 	}
 	return out
 }

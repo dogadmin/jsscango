@@ -154,6 +154,14 @@ func (c *Crawler) expandSourceMap(ctx context.Context, mapURL, referer string) {
 				c.emit(types.DiscoveredURL{
 					URL: f.Value, Referer: referer, Kind: types.KindAPIPath, Source: "sourcemap",
 				})
+			case "frontend_route":
+				// Vue Router / SPA-router navigation paths surfaced from a
+				// .map's sourcesContent. Same shape as the crawler.process
+				// branch — emit with Kind=KindFrontendRoute so the pipeline
+				// keeps them off the probe queue and onto their own event.
+				c.emit(types.DiscoveredURL{
+					URL: f.Value, Referer: referer, Kind: types.KindFrontendRoute, Source: "sourcemap",
+				})
 			}
 		}
 	}
