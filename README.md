@@ -58,6 +58,22 @@ Stages per target:
   to disable.
 - **Crawl depth**: BFS bounded by `--max-depth` (default 3) so cyclic
   webpack imports terminate.
+- **Auto-tune** (v0.4.1+): on startup the tool reads the host's CPU count
+  and RAM, then picks a tier from a baked-in table that sets sensible
+  workers / per-host-qps / parallelism. Explicit flags always win.
+- **Liveness pre-probe** (v0.4.1+): before the main pipeline, `-f` batches
+  with > 50 targets run a concurrent HEAD/GET sweep and drop the dead
+  hosts so probe budget isn't wasted on refused/timeout/DNS-fail entries.
+- **Concurrent targets** (v0.4.1+): `-f` runs N targets in parallel
+  (default from the tier). JSONL collapses to a single combined file
+  with Target column; per-target subdirs still hold response bodies.
+- **CSV output** (v0.4.1+): `--format csv` writes three flat streaming
+  files (`probes.csv`, `fingerprints.csv`, `sensitive.csv`) at the
+  output root. Auto-selected at medium-and-up tiers since XLSX's
+  in-memory model doesn't scale to tens of thousands of targets.
+- **Live progress** (v0.4.1+): on a TTY, a two-row block at the bottom
+  of stderr shows scan-level progress (`存活 alive/total  完成 done/alive`
+  with percentages) plus the current stage's per-counter spinner.
 
 ## Install
 
@@ -72,55 +88,240 @@ go build -o jsscango ./cmd/getjsurlscan
 
 ## Usage
 
+### Quick start
+
 ```sh
-# scan a single target
+# one URL, defaults handle everything (auto-tune, action-aware fan-out, etc.)
 jsscango scan -u https://example.com/
 
-# scan from a file (one URL per line; "#" comments allowed)
-jsscango scan -f targets.txt --workers 32 --per-host-qps 5
-
-# collect URLs only, no probing
-jsscango scan -u https://example.com/ --no-probe
-
-# use external rules
-jsscango scan -u https://example.com/ --rules my-rules.yaml
-
-# show where the user-config rules.yaml lives + which layer wins
-jsscango rules path
-
-# more aggressive: lift the per-host throttle, larger probe pool
-jsscango scan -f targets.txt --per-host-qps 20 --workers-probe 128
+# tens of thousands from a file — auto-tune picks the tier, liveness
+# drops dead hosts, CSV replaces XLSX, N targets run in parallel.
+jsscango scan -f targets.txt
 ```
 
-Run `jsscango scan --help` for the full flag list.
+That's the intended invocation at scale — every other knob below is for
+deviations from the defaults.
 
-### Output layout
+### What you'll see on the terminal
+
+```
+log: results/scan.log
+tune: big  workers=128 workers-probe=256 per-host-qps=15 concurrent-targets=8
+liveness: 2104/2851 alive, 747 dead
+  存活 2104/2851 (73.8%)  完成 42/2104 (2.0%)
+⠹ [probe] elapsed=18.3s urls=1419 js=9 api_paths=856 probes=2120 probes_kept=3
+```
+
+- **`log:`** — full INFO/DEBUG trail; stderr only carries WARN+.
+- **`tune:`** — the resolved auto-tune tier and the values it applied.
+- **`liveness:`** — alive vs total after the pre-probe (`-f` batches > 50).
+- **Top row of the live block** — scan-level: alive count, completed count,
+  percentages. Updates as targets finish.
+- **Bottom row** — current stage + counters, refreshed ~8 Hz.
+
+The live block disappears with `--no-progress` or when stderr isn't a TTY.
+
+### Common scenarios
+
+```sh
+# 1. Single target, default behaviour. Auto-tune kicks in;
+#    JSONL + XLSX written under results/.
+jsscango scan -u https://example.com/
+
+# 2. Batch from file. Liveness pre-probe filters dead hosts;
+#    CSV format auto-selected at medium-and-up tiers.
+jsscango scan -f targets.txt
+
+# 3. Pin a tier explicitly. Useful inside a CI worker with known specs.
+jsscango scan -f targets.txt --tune=big
+
+# 4. Probe a single page, don't actually send requests.
+jsscango scan -u https://example.com/ --no-probe
+
+# 5. Use your own rules file. The auto-materialised
+#    ~/.config/jsscango/rules.yaml is also editable.
+jsscango scan -u https://example.com/ --rules my-rules.yaml
+
+# 6. Pull cookies from a logged-in browser session.
+jsscango scan -u https://intranet.example.com/ -c "session=abc; auth=xyz"
+
+# 7. Headless Chrome off — fall back to static <script src> parsing.
+#    Useful on minimal Linux without the X11 deps installed.
+jsscango scan -u https://example.com/ --chrome=off
+
+# 8. Resume an interrupted run. Each stage marks itself done in
+#    state.json; --resume picks up where the last invocation died.
+jsscango scan -u https://example.com/ --resume
+
+# 9. Aggressive: bypass the tier defaults and push throughput.
+jsscango scan -f targets.txt --tune=off --concurrent-targets=32 \
+    --workers-probe=512 --per-host-qps=50
+
+# 10. Inspect what auto-tune chose without actually scanning.
+jsscango scan -f targets.txt --show-tune
+
+# 11. CSV only (no JSONL, no XLSX) at any scale.
+jsscango scan -f targets.txt --format csv
+
+# 12. Force a per-target XLSX (legacy layout). Incompatible with parallel
+#     targets — the CLI rejects --xlsx-split --concurrent-targets > 1.
+jsscango scan -u https://example.com/ --xlsx-split
+```
+
+Run `jsscango scan --help` for the complete flag list.
+
+### Auto-tune (`--tune`)
+
+On startup the tool detects logical CPU count and total RAM, then picks
+the strongest tier the host satisfies. Tiers preset Workers / Crawl /
+Probe / per-host QPS / Concurrent-Targets.
+
+| Tier         | CPU | RAM   | workers | probe | qps  | parallel |
+| ------------ | --- | ----- | ------- | ----- | ---- | -------- |
+| `tiny`       | 1   | 1 GiB | 16      | 32    | 3    | 1        |
+| `small`      | 2   | 2 GiB | 32      | 64    | 5    | 2        |
+| `small-fat`  | 2   | 4 GiB | 48      | 96    | 5    | 2        |
+| `medium`     | 4   | 4 GiB | 64      | 128   | 8    | 4        |
+| `medium-fat` | 4   | 8 GiB | 96      | 192   | 10   | 4        |
+| `big`        | 8   | 8 GiB | 128     | 256   | 15   | 8        |
+| `big-fat`    | 8   | 16 GiB| 192     | 384   | 20   | 8        |
+| `huge`       | 16  | 16 GiB| 256     | 512   | 25   | 16       |
+| `huge-fat`   | 16  | 32 GiB| 384     | 768   | 30   | 16       |
+
+Flags that interact with auto-tune:
+
+| Flag                  | Effect                                                |
+| --------------------- | ----------------------------------------------------- |
+| `--tune=auto`         | Default; detect tier from host                        |
+| `--tune=<name>`       | Pin a tier (e.g. `--tune=big`)                        |
+| `--tune=off`          | Honour `--workers` / `--per-host-qps` / etc. verbatim |
+| `--show-tune`         | Print the resolved tier values and exit               |
+
+Any flag the operator passes overrides the tier's value for that field.
+The check compares against `config.Default()` — leave a flag unset to
+let auto-tune fill it in.
+
+At `medium` and above, auto-tune also flips the default `--format` from
+`jsonl,xlsx` to `jsonl,csv` (XLSX's in-memory buffering becomes a
+liability at scale). Explicit `--format` is honoured.
+
+### Liveness pre-probe (`--liveness-check`)
+
+For `-f` batches the tool runs a short concurrent HEAD/GET pre-pass to
+drop hosts that won't respond at all (refused / DNS fail / dial timeout
+/ TLS error). Anything that returns ANY HTTP code counts as alive,
+including 401/403/5xx — the host being up is the only criterion.
+
+| Flag                          | Default | What                                    |
+| ----------------------------- | ------- | --------------------------------------- |
+| `--liveness-check=auto`       | auto    | Enabled when len(targets) > threshold   |
+| `--liveness-check=on/off`     | —       | Force on/off                            |
+| `--liveness-timeout=3s`       | 3s      | Per-URL ceiling                         |
+| `--liveness-workers=128`      | 128     | Concurrent probes                       |
+| `--liveness-auto-threshold=50`| 50      | `auto` threshold                        |
+
+Dead targets' reasons go to `<out>/scan.log` (INFO level) so the
+progress window stays clean; the stderr summary just shows
+`liveness: N/M alive, K dead`.
+
+### Output formats (`--format`)
+
+Comma-separated list, any subset of `jsonl|xlsx|csv`.
+
+| Format  | Path(s)                                                  | When to use                                                                                |
+| ------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `jsonl` | `<out>/[<target>/]report.jsonl`                          | Streaming; programmatic consumers (jq, scripts). Combined into one file when ≥ 2 parallel. |
+| `xlsx`  | `<out>/report.xlsx`                                      | Interactive review of small batches (≤ small-fat tier). 10 sheets, `Target` column.        |
+| `csv`   | `<out>/probes.csv` `fingerprints.csv` `sensitive.csv`    | Tens-of-thousands-of-targets scale. Streaming, tiny memory footprint, grep/awk-friendly.   |
+
+CSV columns:
+
+- **`probes.csv`** — `Target | URL | Method | Status | Content-Type | Size | Body Path | SHA256 | Source` (only kept 2xx-JSON/XML probes).
+- **`fingerprints.csv`** — `Target | Rule ID | Kind | Group | Matches | File | URL` (fingerprint + vuln rule hits).
+- **`sensitive.csv`** — `Target | Rule ID | Group | Matches | File | URL` (sensitive rule hits only).
+
+Each CSV opens with `O_APPEND` so `--resume` doesn't double the header.
+
+### Output directory layout
 
 ```
 results/
-├── report.xlsx                       # combined, Target column on every sheet
-├── scan.log                          # full INFO/DEBUG trail
-├── <target1>/
-│   ├── report.jsonl                  # per-target event stream
-│   ├── state.json                    # resume cursor
-│   └── response/                     # saved 2xx bodies
-└── <target2>/
+├── report.jsonl                     # combined when --concurrent-targets > 1
+├── report.xlsx                      # combined; one Target column per sheet
+├── probes.csv                       # only when --format includes csv
+├── fingerprints.csv                 # ditto
+├── sensitive.csv                    # ditto
+├── scan.log                         # full INFO/DEBUG trail
+├── <target1-folder>/
+│   ├── report.jsonl                 # only when --concurrent-targets == 1
+│   ├── state.json                   # resume cursor
+│   └── response/                    # saved 2xx bodies (one per kept probe)
+└── <target2-folder>/
     └── ...
 ```
 
-## Output
-
-- **`report.jsonl`** (one per target, in `<target>/`) — one JSON object per line.
-  Events: `stage`, `discovered_url`, `api_path`, `frontend_route`, `probe`,
-  `rule_hit`, `summary`.
-- **`report.xlsx`** (one combined file at `<out>/report.xlsx`) — 10 sheets,
-  including the new `前端路由 (Vue Router)` and a `Source` column on
-  `探测响应` distinguishing primary / permutate / ancestor_recurse hits.
-  Sheet names match the original Python tool so the legacy `chuli.py`
-  merge script still works.
-
 Saved response bodies live in `<out>/<target>/response/` (only kept when
 `Probe.Kept == true`).
+
+### Rules management
+
+```sh
+# Where will the loader read rules from? Prints the precedence chain.
+jsscango rules path
+
+# Reset the user-config rules.yaml back to the embedded baseline.
+jsscango rules reset
+
+# List all currently-loaded rule IDs, grouped by kind.
+jsscango rules list
+
+# Validate a YAML file without running a scan.
+jsscango rules validate ./my-rules.yaml
+
+# Print the embedded defaults so you can adapt them.
+jsscango rules dump --out ./my-rules-base.yaml
+```
+
+Precedence (highest first):
+
+1. `--rules <path>` CLI flag — hard override; parse failure is fatal.
+2. `$JSSCANGO_RULES_PATH` env var — same fatal semantics.
+3. `<user-config-dir>/jsscango/rules.yaml` — auto-materialised on first
+   scan. Malformed → falls back to embedded with a warning.
+4. Embedded defaults compiled into the binary.
+
+User-config dir per platform: `%APPDATA%\jsscango\` on Windows,
+`~/.config/jsscango/` on Linux, `~/Library/Application Support/jsscango/`
+on macOS.
+
+### Resume
+
+`--resume` reads `results/<target>/state.json` and skips any stage already
+completed. Use it to recover after Ctrl-C or to re-run only the parts
+that failed (e.g. delete `state.json`'s `probe` flag and re-run with
+`--resume` to redo probing only).
+
+### Headless Chrome
+
+`--chrome=auto` (default) uses chromedp when a Chrome/Chromium binary is
+on PATH, otherwise falls back to the static HTML homepage parser. Use
+`--chrome=on` to require it, `--chrome=off` to disable.
+
+When running on minimal Linux containers, install the headless deps:
+
+```sh
+# Ubuntu 24.04+
+apt install -y libgbm1 libnss3 libasound2t64 libxkbcommon0 libxcomposite1 \
+               libxdamage1 libxfixes3 libxrandr2 libxshmfence1 libdrm2 \
+               libpangocairo-1.0-0 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64
+
+# CentOS / RHEL / Rocky
+yum install -y nss alsa-lib mesa-libgbm libXcomposite libXdamage libXrandr \
+               libxshmfence pango cups-libs at-spi2-atk
+```
+
+If you can't install deps, just pass `--chrome=off` — the static
+extractor handles 90% of read-only JS scans on its own.
 
 ## Status
 
@@ -132,6 +333,11 @@ Saved response bodies live in `<out>/<target>/response/` (only kept when
 - **v0.4.0**: framework-aware extraction, HaE rule set merge, user-editable
   rules.yaml, Python-parity URL permutation, ancestor probing, action-aware
   fan-out, combined XLSX, quiet logging — done.
+- **v0.4.1**: auto-tune by CPU/RAM (9 tiers), liveness pre-probe for
+  `-f` batches, concurrent-targets (parallel `-f` target processing),
+  CSV format (three streaming files), live two-row progress block with
+  alive/done/total + percentages, plus two review passes on the v0.4.0
+  batch (21 findings landed) — done.
 
 ### v0.4.0 specifics
 
@@ -264,15 +470,6 @@ Saved response bodies live in `<out>/<target>/response/` (only kept when
 
 - **pprof** is opt-in via `--pprof :6060`. Disabled by default; when on,
   the standard `/debug/pprof/*` handlers are served on the given address.
-
-`--chrome=auto` (default) uses chromedp when a Chrome/Chromium binary is on
-PATH, otherwise falls back to the static HTML homepage parser. Use
-`--chrome=on` to require it, `--chrome=off` to disable.
-
-`--resume` reads `results/<target>/state.json` and skips any stage already
-completed. Use it to recover after Ctrl-C or to re-run only the parts that
-failed (e.g. delete `state.json`'s `probe` flag and re-run with `--resume`
-to redo probing only).
 
 ## License
 
