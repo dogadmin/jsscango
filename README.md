@@ -495,6 +495,25 @@ preinstalled.
 - **pprof** is opt-in via `--pprof :6060`. Disabled by default; when on,
   the standard `/debug/pprof/*` handlers are served on the given address.
 
+## Acknowledgements
+
+This tool stands on the shoulders of two open-source projects:
+
+- **[ChkApi_0x727](https://github.com/0x727/ChkApi_0x727)** by the
+  [0x727](https://github.com/0x727) team — the original
+  JavaScript / API-endpoint discovery approach that the Python
+  `getjsurlscan` (and in turn this Go rewrite) is built on. The
+  five-stage homepage → crawl → api-path → probe → postprocess pipeline
+  and much of the URL-permutation logic trace back to ChkApi.
+- **[HaE](https://github.com/gh0stkey/HaE)** by
+  [gh0stkey](https://github.com/gh0stkey) — the community-maintained
+  highlighter/extractor rule set. jsscango's fingerprint / vuln /
+  sensitive-info detection rules are derived from HaE's `Rules.yml`
+  (see `scripts/fetch_hae_rules.sh` for the conversion); the merged set
+  ships embedded as the default.
+
+Thanks to both projects and their contributors.
+
 ## License
 
 MIT. See LICENSE.
