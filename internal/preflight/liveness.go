@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -75,7 +74,6 @@ func Check(ctx context.Context, urls []string, timeout time.Duration, workers in
 	alive := make([]string, 0, total/2)
 	dead := make([]DeadTarget, 0, total/2)
 	var mu sync.Mutex
-	var aliveN, deadN atomic.Int64
 
 	sem := semaphore.NewWeighted(int64(workers))
 	g, gctx := errgroup.WithContext(ctx)
@@ -93,17 +91,18 @@ func Check(ctx context.Context, urls []string, timeout time.Duration, workers in
 		g.Go(func() error {
 			defer sem.Release(1)
 			ok, reason := probeOne(gctx, client, u)
+			// onProgress fires under mu so callbacks are serialized and
+			// the (alive, dead) snapshot is consistent with the appends.
+			// Callers therefore never need a thread-safe callback.
 			mu.Lock()
+			defer mu.Unlock()
 			if ok {
 				alive = append(alive, u)
-				aliveN.Add(1)
 			} else {
 				dead = append(dead, DeadTarget{URL: u, Reason: reason})
-				deadN.Add(1)
 			}
-			mu.Unlock()
 			if onProgress != nil {
-				onProgress(int(aliveN.Load()), int(deadN.Load()), total)
+				onProgress(len(alive), len(dead), total)
 			}
 			return nil
 		})
